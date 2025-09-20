@@ -1,8 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    turbo: true, // optional; remove if you don’t want Turbo
-  },
+  // Remove experimental.turbo to silence the warning in Next 15.
+  // Add other config here if needed.
 };
 
 export default nextConfig;
