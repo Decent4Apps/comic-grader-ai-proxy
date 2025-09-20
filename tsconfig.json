@@ -14,7 +14,7 @@
     },
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node", "react", "react-dom"]
   },
   "include": ["app", "src", "next-env.d.ts"],
   "exclude": ["node_modules"]
