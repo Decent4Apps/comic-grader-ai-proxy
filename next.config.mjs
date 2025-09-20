@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Remove experimental.turbo to silence the warning in Next 15.
-  // Add other config here if needed.
+  // Keep empty or add stable options only.
+  // Removed experimental.turbo to satisfy Next 15 validation.
 };
 
 export default nextConfig;
