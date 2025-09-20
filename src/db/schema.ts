@@ -26,7 +26,7 @@ export const analyses = pgTable("analyses", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   imageUrl: text("image_url"),
-  payload: jsonb("payload").notNull(),    // your ComicAnalysis JSON
+  payload: jsonb("payload").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -38,4 +38,17 @@ export const purchases = pgTable("purchases", {
   currency: varchar("currency", { length: 8 }).default("USD").notNull(),
   purchasedAt: timestamp("purchased_at", { withTimezone: true }).defaultNow().notNull(),
   raw: jsonb("raw"),
+});
+
+export const events = pgTable("events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id"),
+  name: varchar("name", { length: 128 }).notNull(),
+  props: jsonb("props").$type<Record<string, any>>().default({}).notNull(),
+  platform: varchar("platform", { length: 32 }).default("mobile").notNull(),
+  appVersion: varchar("app_version", { length: 32 }),
+  deviceId: varchar("device_id", { length: 128 }),
+  ip: text("ip"),
+  ua: text("ua"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
