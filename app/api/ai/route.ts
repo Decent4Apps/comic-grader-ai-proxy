@@ -1,57 +1,58 @@
-import { withCORS } from '@/src/lib/cors';
-import { verifySessionJWT } from '@/src/auth/tokens';
-import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
+import { withCORS } from "@/src/lib/cors";
+import { verifySessionJWT } from "@/src/auth/tokens";
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 
-export const runtime = 'nodejs'; // using SDKs
+export const runtime = "nodejs";
 
-type Msg = { role: 'user'|'assistant'|'system', content: string | Array<{type:'text'|'image_url', text?:string, image_url?:{url:string}}> };
+type Msg = { role: "user" | "assistant" | "system", content: any };
 
 export const POST = withCORS(async (req) => {
-  const auth = req.headers.get('authorization');
-  const bypass = req.headers.get('x-bypass-token');
-  const body = await req.json();
-  const { provider, model, messages, temperature, maxTokens } = body as {
-    provider: 'openai'|'anthropic'|'grok'|'gemini',
-    model?: string, messages: Msg[], temperature?: number, maxTokens?: number
-  };
+  const auth = req.headers.get("authorization");
+  const bypass = req.headers.get("x-bypass-token");
+  const { provider, model, messages, temperature, maxTokens } = await req.json();
 
-  // Require either a valid session or the dev bypass token
+  // Require auth or dev bypass
   if (!bypass || bypass !== process.env.BYPASS_TOKEN) {
-    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (!token) return Response.json({ error: 'unauthorized' }, { status: 401 });
-    await verifySessionJWT(token).catch(() => { throw new Error('unauthorized'); });
+    const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+    await verifySessionJWT(token).catch(() => { throw new Error("unauthorized"); });
   }
 
-  if (!messages?.length) return Response.json({ error: 'messages required' }, { status: 400 });
+  if (!messages?.length) return Response.json({ error: "messages required" }, { status: 400 });
 
-  if (provider === 'openai') {
+  if (provider === "openai") {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
     const r = await client.chat.completions.create({
-      model: model ?? 'gpt-4o-mini',
+      model: model ?? "gpt-4o-mini",
       temperature, max_tokens: maxTokens,
-      messages: messages.map(m => typeof m.content === 'string'
-        ? { role: m.role, content: m.content }
-        : { role: m.role, content: m.content.map(c => c.type === 'text' ? { type:'text', text:c.text! } : { type:'image_url', image_url:c.image_url! }) }
-      )
+      messages
     });
-    const text = r.choices[0]?.message?.content ?? '';
-    return Response.json({ content: text, usage: r.usage ? {
-      promptTokens: r.usage.prompt_tokens, completionTokens: r.usage.completion_tokens, totalTokens: r.usage.total_tokens
-    } : undefined });
+    const text = r.choices[0]?.message?.content ?? "";
+    return Response.json({
+      content: text,
+      usage: r.usage ? {
+        promptTokens: r.usage.prompt_tokens,
+        completionTokens: r.usage.completion_tokens,
+        totalTokens: r.usage.total_tokens
+      } : undefined
+    });
   }
 
-  if (provider === 'anthropic') {
+  if (provider === "anthropic") {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
     const r = await client.messages.create({
-      model: model ?? 'claude-3-5-sonnet-20240620',
+      model: model ?? "claude-3-5-sonnet-20240620",
       temperature, max_tokens: maxTokens ?? 1024,
-      messages: messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }))
+      messages: messages.map((m: Msg) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content)
+      }))
     });
-    const text = (r.content[0] as any)?.text ?? '';
+    const text = (r.content[0] as any)?.text ?? "";
     return Response.json({ content: text });
   }
 
-  // TODO: add xAI and Gemini with fetch calls to their HTTP APIs (similar mapping)
-  return Response.json({ error: 'provider not implemented' }, { status: 400 });
+  // TODO: add xAI (Grok) and Gemini via fetch
+  return Response.json({ error: "provider not implemented" }, { status: 400 });
 });
