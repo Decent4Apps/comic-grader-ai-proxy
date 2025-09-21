@@ -3,10 +3,10 @@ import { createSessionJWT } from "@/src/auth/tokens";
 
 export const runtime = "nodejs";
 
-// POST /api/auth/anon  -> { token, user: { id, kind:"anonymous" } }
+// POST /api/auth/anon -> { token, user: { id, kind:"anonymous" } }
 export const POST = withCORS(async () => {
   const anonId = `anon:${crypto.randomUUID()}`;
-  // 24h token; adjust as you like
+  // 24 hours; tune as needed
   const token = await createSessionJWT(anonId, 24);
   return Response.json({ token, user: { id: anonId, kind: "anonymous" } });
 });
