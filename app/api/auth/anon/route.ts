@@ -3,17 +3,10 @@ import { createSessionJWT } from "@/src/auth/tokens";
 
 export const runtime = "nodejs";
 
-// Optionally, add IP-based rate limiting or deviceId param checks here.
-export const POST = withCORS(async (req) => {
-  // You can accept { deviceId } from the app and log it if you want:
-  // const { deviceId } = await req.json().catch(() => ({}));
-
+// POST /api/auth/anon  -> { token, user: { id, kind:"anonymous" } }
+export const POST = withCORS(async () => {
   const anonId = `anon:${crypto.randomUUID()}`;
-  // 24h tokens; tune as needed:
+  // 24h token; adjust as you like
   const token = await createSessionJWT(anonId, 24);
-
-  return Response.json({
-    token,
-    user: { id: anonId, kind: "anonymous" }
-  });
+  return Response.json({ token, user: { id: anonId, kind: "anonymous" } });
 });
