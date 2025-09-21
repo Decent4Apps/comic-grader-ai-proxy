@@ -1,6 +1,5 @@
 import { withCORS } from "@/src/lib/cors";
 export const runtime = "nodejs";
-
 export const GET = withCORS(async () => {
   return Response.json({
     ok: true,
