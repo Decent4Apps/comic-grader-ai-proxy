@@ -1,4 +1,7 @@
 import { withCORS } from "@/src/lib/cors";
+import { db } from "@/src/db/client";
+import { pricingCache } from "@/src/db/schema";
+import { and, eq, gt } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -8,7 +11,9 @@ type QueryInput = {
   publisher?: string;
   year?: string;
   gradeRange?: { min: number; max: number };
-  max?: number; // per-site limit (default 5)
+  max?: number;            // per-site limit (default 5)
+  cacheTtlMinutes?: number; // default 240 (4h)
+  bypassCache?: boolean;    // set true to force refresh
 };
 
 type Comp = {
@@ -19,6 +24,13 @@ type Comp = {
   url: string;
   snippet?: string;
   date?: string;
+};
+
+type PricingPayload = {
+  ok: true;
+  query: Record<string, any>;
+  stats: { count: number; averageUsd: number | null; medianUsd: number | null };
+  comps: Comp[];
 };
 
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v2/search";
@@ -36,12 +48,31 @@ export const POST = withCORS(async (req) => {
     year,
     gradeRange,
     max = 5,
+    cacheTtlMinutes = 240,
+    bypassCache = false,
   } = body;
 
   if (!comicTitle?.trim()) {
     return Response.json({ error: "comicTitle required" }, { status: 400 });
   }
 
+  // ---------- Cache lookup ----------
+  const key = makeCacheKey({ comicTitle, issueNumber, publisher, year, gradeRange });
+  const now = new Date();
+  const ttlMs = Math.max(1, cacheTtlMinutes) * 60 * 1000;
+
+  if (!bypassCache) {
+    const fresh = await db
+      .select()
+      .from(pricingCache)
+      .where(and(eq(pricingCache.key, key), gt(pricingCache.expiresAt, now)));
+
+    if (fresh.length) {
+      return Response.json(fresh[0].payload as PricingPayload);
+    }
+  }
+
+  // ---------- Build queries ----------
   const basePhrases = [
     `${comicTitle} ${issueNumber ? "#" + String(issueNumber).trim() : ""} sold price`,
     `${comicTitle} ${issueNumber ? "#" + String(issueNumber).trim() : ""} sale`,
@@ -57,7 +88,6 @@ export const POST = withCORS(async (req) => {
     .filter(Boolean)
     .join(" ");
 
-  // Curate sources you trust; you can add/remove to tune results
   const sites = [
     "site:ebay.com",
     "site:heritageauctions.com",
@@ -71,6 +101,7 @@ export const POST = withCORS(async (req) => {
     basePhrases.map((q) => `${q} ${hints} ${site}`.replace(/\s+/g, " ").trim())
   );
 
+  // ---------- Firecrawl fetch ----------
   const headers = {
     Authorization: `Bearer ${process.env.FIRECRAWL_API_KEY}`,
     "Content-Type": "application/json",
@@ -82,8 +113,6 @@ export const POST = withCORS(async (req) => {
 
   const seen = new Set<string>();
   const comps: Comp[] = [];
-
-  // Cap total processed pages defensively
   const MAX_TOTAL = Math.min(queries.length * Math.max(1, max), 60);
 
   for (const q of queries) {
@@ -99,8 +128,8 @@ export const POST = withCORS(async (req) => {
           onlyMainContent: true,
           location: { country: "US", languages: ["en-US"] },
           storeInCache: true,
-          proxy: "auto"
-        }
+          proxy: "auto",
+        },
       }),
     }).catch(() => null);
 
@@ -114,18 +143,12 @@ export const POST = withCORS(async (req) => {
       seen.add(url);
 
       const domain = safeDomain(url);
-      const text = [
-        r.markdown,
-        r.html,
-        r.rawHtml,
-        r.description,
-        r.title,
-      ]
+      const text = [r.markdown, r.html, r.rawHtml, r.description, r.title]
         .filter(Boolean)
         .join("\n")
         .slice(0, 200_000);
 
-      // Collect all USD-like prices on the page
+      // Extract prices
       const prices: number[] = [];
       for (const match of text.matchAll(priceRegex)) {
         const raw = (match[1] || "").replace(/,/g, "");
@@ -134,10 +157,12 @@ export const POST = withCORS(async (req) => {
       }
       if (!prices.length) continue;
 
-      // Heuristic: reward phrases indicating actual sale (not asking)
+      // Prefer context that indicates actual sale
       const score = (v: number) => {
         const pattern = new RegExp(
-          `(sold|hammer|final|winning bid|price)[^\\n]{0,60}\\$?${escapeForRegExp(v.toLocaleString("en-US"))}`,
+          `(sold|hammer|final|winning bid|price)[^\\n]{0,60}\\$?${escapeForRegExp(
+            v.toLocaleString("en-US")
+          )}`,
           "i"
         );
         return pattern.test(text) ? 3 : 1;
@@ -179,15 +204,38 @@ export const POST = withCORS(async (req) => {
           (prices.reduce((a, b) => a + b, 0) / prices.length) * 100
         ) / 100;
 
-  return Response.json({
+  const payload: PricingPayload = {
     ok: true,
     query: { comicTitle, issueNumber, publisher, year, gradeRange },
     stats: { count: normalized.length, averageUsd: avg, medianUsd: median },
     comps: normalized.slice(0, 50),
-  });
+  };
+
+  // ---------- Write cache ----------
+  const expiresAt = new Date(Date.now() + ttlMs);
+  await db
+    .insert(pricingCache)
+    .values({ key, payload, expiresAt })
+    .onConflictDoUpdate({
+      target: pricingCache.key,
+      set: { payload, expiresAt },
+    });
+
+  return Response.json(payload);
 });
 
 // utils
+function makeCacheKey(parts: Record<string, any>) {
+  const stable = JSON.stringify(parts, Object.keys(parts).sort());
+  // lightweight hash
+  let h = 0;
+  for (let i = 0; i < stable.length; i++) {
+    h = (h << 5) - h + stable.charCodeAt(i);
+    h |= 0;
+  }
+  return `pricing:${Math.abs(h)}`;
+}
+
 function safeDomain(url: string) {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
