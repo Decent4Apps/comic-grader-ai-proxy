@@ -1,6 +1,5 @@
 import { pgTable, uuid, varchar, timestamp, jsonb, integer, text } from "drizzle-orm/pg-core";
 
-// Users / Sessions / OTP
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 320 }).notNull().unique(),
@@ -23,7 +22,6 @@ export const otpCodes = pgTable("otp_codes", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// Analyses / Purchases
 export const analyses = pgTable("analyses", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
@@ -42,7 +40,6 @@ export const purchases = pgTable("purchases", {
   raw: jsonb("raw"),
 });
 
-// Mobile analytics events
 export const events = pgTable("events", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id"),
@@ -56,7 +53,6 @@ export const events = pgTable("events", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// Firecrawl pricing cache
 export const pricingCache = pgTable("pricing_cache", {
   key: varchar("key", { length: 200 }).primaryKey(),
   payload: jsonb("payload").notNull(),
