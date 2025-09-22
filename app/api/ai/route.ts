@@ -17,7 +17,6 @@ async function requireAuthOrAnon(req: Request) {
     await verifySessionJWT(token).catch(() => { throw new Error("unauthorized"); });
     return;
   }
-
   if (bypass && bypass === process.env.BYPASS_TOKEN) return;
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
