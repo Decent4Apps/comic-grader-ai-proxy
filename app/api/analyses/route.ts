@@ -18,7 +18,6 @@ async function requireAuthOrAnon(req: Request) {
     await verifySessionJWT(token).catch(() => { throw new Error("unauthorized"); });
     return;
   }
-
   if (bypass && bypass === process.env.BYPASS_TOKEN) return;
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -37,12 +36,7 @@ export const GET = withCORS(async (req) => {
   if (gate) return gate;
   try {
     const userId = await getUserId(req);
-    const rows = await db
-      .select()
-      .from(analyses)
-      .where(eq(analyses.userId, userId))
-      .orderBy(desc(analyses.createdAt))
-      .limit(100);
+    const rows = await db.select().from(analyses).where(eq(analyses.userId, userId)).orderBy(desc(analyses.createdAt)).limit(100);
     return Response.json({ items: rows });
   } catch {
     return Response.json({ error: "unauthorized" }, { status: 401 });
