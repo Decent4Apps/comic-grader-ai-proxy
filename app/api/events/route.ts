@@ -6,32 +6,24 @@ import { verifySessionJWT } from "@/src/auth/tokens";
 
 export const runtime = "nodejs";
 
+const isProd = process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
+
 async function maybeUserId(req: Request) {
   const h = await headers();
   const auth = h.get("authorization");
   const bypass = h.get("x-bypass-token");
 
-  if (process.env.NODE_ENV === "production") {
+  if (isProd) {
     const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (!token) return null; // allow anonymous analytics if you like
-    try {
-      return await verifySessionJWT(token);
-    } catch {
-      return null;
-    }
+    if (!token) return null;
+    try { return await verifySessionJWT(token); } catch { return null; }
   }
 
-  if (bypass && bypass === process.env.BYPASS_TOKEN) {
-    return "dev-bypass";
-  }
+  if (bypass && bypass === process.env.BYPASS_TOKEN) return "dev-bypass";
 
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return null;
-  try {
-    return await verifySessionJWT(token);
-  } catch {
-    return null;
-  }
+  try { return await verifySessionJWT(token); } catch { return null; }
 }
 
 export const POST = withCORS(async (req) => {
@@ -52,7 +44,7 @@ export const POST = withCORS(async (req) => {
     appVersion,
     deviceId,
     ip,
-    ua,
+    ua
   });
 
   return Response.json({ ok: true });
