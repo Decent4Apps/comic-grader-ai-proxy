@@ -1,5 +1,4 @@
 import { SignJWT, jwtVerify } from "jose";
-
 const secret = new TextEncoder().encode(process.env.AUTH_JWT_SECRET!);
 
 export async function createSessionJWT(userId: string, ttlHours = 24 * 30) {
