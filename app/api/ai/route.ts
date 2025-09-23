@@ -1,5 +1,5 @@
 // app/api/ai/route.ts
-import { withCORS } from "@/src/lib/cors";
+import { withCORS } from "../_lib/cors";
 import { verifySessionJWT } from "@/src/auth/tokens";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
@@ -10,27 +10,19 @@ const isProd =
   process.env.VERCEL_ENV === "production" ||
   process.env.NODE_ENV === "production";
 
-// Optional OpenAI firewall; do NOT reuse for Anthropic
 const SUPERAGENT_PROXY_URL = process.env.SUPERAGENT_PROXY_URL || undefined;
 
 async function requireAuthOrAnon(req: Request) {
   const auth = req.headers.get("authorization");
   const bypass = req.headers.get("x-bypass-token");
 
-  if (isProd) {
-    const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
-    await verifySessionJWT(token).catch(() => {
-      throw new Error("unauthorized");
-    });
-    return;
+  if (!isProd) {
+    if (bypass && bypass === process.env.BYPASS_TOKEN) return;
   }
-
-  // In non-prod you may bypass with a token
-  if (bypass && bypass === process.env.BYPASS_TOKEN) return;
 
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+
   await verifySessionJWT(token).catch(() => {
     throw new Error("unauthorized");
   });
@@ -44,7 +36,7 @@ export const POST = withCORS(async (req) => {
     if (gate) return gate;
 
     const body = await req.json();
-    const { provider, model, messages, temperature, maxTokens } = body;
+    const { provider, model, messages, temperature, maxTokens } = body || {};
 
     if (!messages?.length) {
       return Response.json({ error: "messages required" }, { status: 400 });
@@ -53,7 +45,7 @@ export const POST = withCORS(async (req) => {
     if (provider === "openai") {
       const client = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY!,
-        baseURL: SUPERAGENT_PROXY_URL || undefined, // OK for OpenAI only
+        baseURL: SUPERAGENT_PROXY_URL || undefined, // only for OpenAI firewalls
       });
 
       const r = await client.chat.completions.create({
@@ -68,10 +60,8 @@ export const POST = withCORS(async (req) => {
     }
 
     if (provider === "anthropic") {
-      // IMPORTANT: do NOT pass baseURL unless you actually run an Anthropic-compatible gateway
-      const a = new Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY!,
-      });
+      // Do NOT pass baseURL for Anthropic unless you run an Anthropic-compatible gateway
+      const a = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
       const r = await a.messages.create({
         model: model ?? "claude-3-7-sonnet-latest",
@@ -86,16 +76,19 @@ export const POST = withCORS(async (req) => {
         })),
       });
 
+      // Normalized text extraction
       const text =
-        (Array.isArray(r.content) && (r.content[0] as any)?.text) || "";
+        Array.isArray(r.content) && (r.content[0] as any)?.text
+          ? (r.content[0] as any).text
+          : "";
       return Response.json({ content: text });
     }
 
     return Response.json({ error: "provider not implemented" }, { status: 400 });
   } catch (err: any) {
-    // Bubble up useful diagnostics rather than a generic 500
     const details =
       err?.response?.data ||
+      err?.data ||
       err?.error ||
       err?.message ||
       "unknown server error";
