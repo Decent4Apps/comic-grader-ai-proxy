@@ -1,4 +1,5 @@
-export const runtime = "nodejs"; // avoid Edge while debugging
+// app/api/health/route.ts
+export const runtime = "nodejs";
 
 export async function GET() {
   return new Response(
