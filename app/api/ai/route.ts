@@ -10,16 +10,19 @@ const isProd =
   process.env.VERCEL_ENV === "production" ||
   process.env.NODE_ENV === "production";
 
+// Optional OpenAI firewall (Superagent, etc) — for OpenAI ONLY.
 const SUPERAGENT_PROXY_URL = process.env.SUPERAGENT_PROXY_URL || undefined;
 
 async function requireAuthOrAnon(req: Request) {
   const auth = req.headers.get("authorization");
   const bypass = req.headers.get("x-bypass-token");
 
+  // In preview/dev, allow an X-Bypass-Token (set BYPASS_TOKEN in Vercel)
   if (!isProd) {
     if (bypass && bypass === process.env.BYPASS_TOKEN) return;
   }
 
+  // Otherwise require a Bearer token (replace verifySessionJWT with your real check)
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -45,7 +48,8 @@ export const POST = withCORS(async (req) => {
     if (provider === "openai") {
       const client = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY!,
-        baseURL: SUPERAGENT_PROXY_URL || undefined, // only for OpenAI firewalls
+        // OK to route OpenAI via a firewall if you use one:
+        baseURL: SUPERAGENT_PROXY_URL || undefined,
       });
 
       const r = await client.chat.completions.create({
@@ -60,7 +64,7 @@ export const POST = withCORS(async (req) => {
     }
 
     if (provider === "anthropic") {
-      // Do NOT pass baseURL for Anthropic unless you run an Anthropic-compatible gateway
+      // IMPORTANT: do NOT set baseURL unless your gateway supports Anthropic’s API.
       const a = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
       const r = await a.messages.create({
@@ -76,7 +80,6 @@ export const POST = withCORS(async (req) => {
         })),
       });
 
-      // Normalized text extraction
       const text =
         Array.isArray(r.content) && (r.content[0] as any)?.text
           ? (r.content[0] as any).text
