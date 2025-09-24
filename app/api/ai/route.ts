@@ -1,95 +1,100 @@
 // app/api/ai/route.ts
-import { withCORS } from "../_lib/cors"; // keep this path if you used api/_lib/cors.ts
-import { verifySessionJWT } from "@/src/auth/tokens"; // or adjust if your verify lives elsewhere
+import { withCORS } from "../_lib/cors";
+import { verifySessionJWT } from "@/src/auth/tokens";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 
 export const runtime = "nodejs";
 
 const isProd =
-  process.env.VERCEL_ENV === "production" ||
-  process.env.NODE_ENV === "production";
+  process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
 
-/**
- * ENV wiring
- * - For Anthropic via Superagent firewall: set ANTHROPIC_BASE_URL to your Superagent proxy URL
- *   (e.g. https://firewall.superagent.sh/j97882v2grrbt5epxb8xtr1pyh7py3re)
- *   and keep ANTHROPIC_API_KEY as your real Claude key (the firewall forwards it).
- * - For OpenAI via firewall/gateway (optional): set OPENAI_BASE_URL (or leave empty to hit OpenAI directly).
- */
-const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || undefined;
 const OPENAI_BASE_URL =
   process.env.OPENAI_BASE_URL || process.env.SUPERAGENT_PROXY_URL || undefined;
+const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || undefined;
 
 async function gate(req: Request) {
   const auth = req.headers.get("authorization");
   const bypass = req.headers.get("x-bypass-token");
-
-  if (!isProd && bypass && bypass === process.env.BYPASS_TOKEN) return;
-
+  if (!isProd && bypass && bypass === process.env.BYPASS_TOKEN) return; // dev-only bypass
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
-
-  await verifySessionJWT(token).catch(() => {
-    throw new Error("unauthorized");
-  });
+  await verifySessionJWT(token).catch(() => { throw new Error("unauthorized"); });
 }
 
-type Msg = { role: "user" | "assistant" | "system"; content: any };
+type Role = "user" | "assistant" | "system";
+type Msg = { role: Role; content: string };
+
+function ensureBody(obj: any) {
+  if (!obj || typeof obj !== "object") throw new Error("bad_request");
+  const { provider, model, temperature, maxTokens, messages } = obj;
+  if (!provider) throw new Error("missing provider");
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("missing messages");
+  }
+  return { provider, model, temperature, maxTokens, messages: messages as Msg[] };
+}
 
 export const POST = withCORS(async (req) => {
   try {
     const g = await gate(req);
-    if (g) return g;
+    if (g instanceof Response) return g;
 
     const body = await req.json();
-    const { provider, model, messages, temperature, maxTokens } = body || {};
-
-    if (!messages?.length) {
-      return Response.json({ error: "messages required" }, { status: 400 });
-    }
+    const { provider, model, temperature, maxTokens, messages } = ensureBody(body);
 
     if (provider === "openai") {
-      const client = new OpenAI({
+      const openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY!,
-        baseURL: OPENAI_BASE_URL, // optional: route OpenAI through a firewall/gateway
+        baseURL: OPENAI_BASE_URL
       });
 
-      const r = await client.chat.completions.create({
+      const resp = await openai.chat.completions.create({
         model: model ?? "gpt-4o-mini",
-        temperature,
-        max_tokens: maxTokens,
-        messages,
+        temperature: typeof temperature === "number" ? temperature : 0.2,
+        max_tokens: typeof maxTokens === "number" ? maxTokens : undefined,
+        messages: messages.map(m => ({ role: m.role, content: m.content }))
       });
 
-      const text = r.choices[0]?.message?.content ?? "";
-      return Response.json({ content: text });
+      const choice = resp.choices?.[0];
+      return Response.json({
+        provider: "openai",
+        model: resp.model,
+        finish_reason: choice?.finish_reason,
+        content: choice?.message?.content ?? ""
+      }, { status: 200 });
     }
 
     if (provider === "anthropic") {
-      // Superagent supports Anthropic SDK by swapping baseURL to your Superagent proxy URL
-      // per docs: just set baseURL and keep your normal Anthropic API key. :contentReference[oaicite:1]{index=1}
-      const a = new Anthropic({
+      const anthropic = new Anthropic({
         apiKey: process.env.ANTHROPIC_API_KEY!,
-        baseURL: ANTHROPIC_BASE_URL, // ← set to your Superagent firewall URL
+        baseURL: ANTHROPIC_BASE_URL
       });
 
-      const r = await a.messages.create({
+      // Extract system prompt; Anthropic expects it separately
+      const systemParts = messages.filter(m => m.role === "system").map(m => m.content);
+      const system = systemParts.length ? systemParts.join("\n\n") : undefined;
+      const chat = messages
+        .filter(m => m.role !== "system")
+        .map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+      const resp = await anthropic.messages.create({
         model: model ?? "claude-3-7-sonnet-latest",
-        temperature,
-        max_tokens: maxTokens ?? 1024,
-        messages: (messages as Msg[]).map((m) => ({
-          role: m.role === "assistant" ? "assistant" : "user",
-          content:
-            typeof m.content === "string"
-              ? m.content
-              : JSON.stringify(m.content),
-        })),
-      });
+        temperature: typeof temperature === "number" ? temperature : 0.2,
+        max_tokens: typeof maxTokens === "number" ? maxTokens : 512,
+        system,
+        messages: chat
+      } as any);
 
       const text =
-        (Array.isArray(r.content) && (r.content[0] as any)?.text) || "";
-      return Response.json({ content: text });
+        Array.isArray(resp.content) && resp.content.length
+          ? (resp.content[0] as any).text ?? ""
+          : "";
+      return Response.json({
+        provider: "anthropic",
+        model: resp.model,
+        content: text
+      }, { status: 200 });
     }
 
     return Response.json({ error: "provider not implemented" }, { status: 400 });
@@ -107,3 +112,10 @@ export const POST = withCORS(async (req) => {
     return Response.json({ error: "proxy_error", details }, { status });
   }
 });
+
+export async function GET() {
+  return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
+    status: 200,
+    headers: { "content-type": "application/json", "cache-control": "no-store" }
+  });
+}
