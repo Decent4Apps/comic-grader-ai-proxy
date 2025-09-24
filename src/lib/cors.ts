@@ -1,21 +1,28 @@
-export function withCORS(handler: (req: Request) => Promise<Response>) {
+// src/lib/cors.ts
+export function withCORS(
+  handler: (req: Request) => Promise<Response> | Response
+) {
   return async (req: Request) => {
-    if (req.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
-    }
-    const res = await handler(req);
-    const headers = new Headers(res.headers);
-    const ch = corsHeaders();
-    ch.forEach((v, k) => headers.set(k, v));
-    return new Response(res.body, { status: res.status, headers });
-  };
-}
+    const origin = req.headers.get("origin") ?? "*";
 
-function corsHeaders() {
-  const origins = process.env.ALLOWED_ORIGINS?.split(",").map(s => s.trim()) ?? ["*"];
-  return new Headers({
-    "Access-Control-Allow-Origin": origins.includes("*") ? "*" : origins[0],
-    "Access-Control-Allow-Headers": "authorization, content-type, x-bypass-token",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
-  });
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": origin,
+          "access-control-allow-methods": "GET,POST,OPTIONS",
+          "access-control-allow-headers":
+            "authorization,content-type,x-bypass-token",
+          "access-control-max-age": "86400",
+          "vary": "origin",
+        },
+      });
+    }
+
+    const res = await handler(req);
+    const h = new Headers(res.headers);
+    h.set("access-control-allow-origin", origin);
+    h.set("vary", "origin");
+    return new Response(res.body, { status: res.status, headers: h });
+  };
 }
