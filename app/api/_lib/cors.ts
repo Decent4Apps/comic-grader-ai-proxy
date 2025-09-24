@@ -4,6 +4,8 @@ export function withCORS(
 ) {
   return async (req: Request) => {
     const origin = req.headers.get("origin") ?? "*";
+
+    // Handle preflight quickly
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -17,6 +19,7 @@ export function withCORS(
       });
     }
 
+    // Normal request
     const res = await handler(req);
     const h = new Headers(res.headers);
     h.set("access-control-allow-origin", origin);
