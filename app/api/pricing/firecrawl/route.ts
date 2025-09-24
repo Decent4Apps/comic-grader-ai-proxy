@@ -104,15 +104,16 @@ export const POST = withCORS(async (req) => {
     const ttl = Math.max(300, Math.min(86400, Number(body?.ttlSeconds ?? DEFAULT_TTL)));
     const key = cacheKey(query);
 
-    // 1) Try cache
+    // 1) Try cache (cast result AFTER the query to avoid generic/constraint issues)
     try {
       const sql = await getSql();
-      const rows: { payload: any }[] = await sql`
+      const rawRows = await sql`
         select payload
         from pricing_cache
         where key=${key} and expires_at > now()
         limit 1
       `;
+      const rows = rawRows as unknown as { payload: any }[];
       if (rows.length) {
         return Response.json(rows[0].payload as PriceResult, { status: 200 });
       }
