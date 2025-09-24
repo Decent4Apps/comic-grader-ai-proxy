@@ -1,0 +1,38 @@
+name: Smoke (Production)
+
+on:
+  workflow_run:
+    workflows: [ CI ]
+    types: [ completed ]
+    branches: [ main ]
+
+jobs:
+  smoke:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      BASE: https://comic-grader-ai-proxy.vercel.app
+    steps:
+      - name: Health
+        run: |
+          set -e
+          curl -fsS "$BASE/api/health" | jq .
+
+      - name: Auth (anon)
+        id: anon
+        run: |
+          set -e
+          TOK=$(curl -fsS -X POST "$BASE/api/auth/anon" | jq -r .token)
+          test -n "$TOK" || (echo "No token"; exit 1)
+          echo "token=$TOK" >> $GITHUB_OUTPUT
+
+      - name: AI ping
+        env:
+          TOKEN: ${{ steps.anon.outputs.token }}
+        run: |
+          set -e
+          curl -fsS -X POST "$BASE/api/ai" \
+            -H "authorization: Bearer $TOKEN" \
+            -H "content-type: application/json" \
+            -d '{"provider":"openai","model":"gpt-4o-mini","temperature":0.2,"messages":[{"role":"user","content":"ping"}]}' \
+            | jq .
