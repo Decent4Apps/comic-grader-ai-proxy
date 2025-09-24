@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.28.0",
+    "@neondatabase/serverless": "^0.9.0",
     "next": "^14.2.5",
     "openai": "^4.56.0",
     "react": "18.2.0",
@@ -28,5 +29,16 @@
   },
   "engines": {
     "node": ">=18.17"
-  }
+  },
+  "keywords": [
+    "nextjs",
+    "vercel",
+    "proxy",
+    "openai",
+    "anthropic",
+    "serverless",
+    "neon",
+    "api"
+  ],
+  "license": "UNLICENSED"
 }
