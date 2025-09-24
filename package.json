@@ -2,28 +2,31 @@
   "name": "comic-grader-ai-proxy",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
+  "description": "Server-side proxy for the Comic Grader app (auth, AI, health, pricing).",
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev",
     "build": "next build",
-    "start": "next start -p 3000",
-    "lint": "next lint"
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --check ."
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.29.0",
-    "next": "14.2.5",
-    "openai": "^4.58.1",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "@anthropic-ai/sdk": "^0.28.0",
+    "next": "^14.2.5",
+    "openai": "^4.56.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.9",
-    "@types/react": "^18.3.3",
+    "@types/node": "^20.11.30",
+    "@types/react": "^18.2.66",
     "eslint": "^8.57.0",
-    "eslint-config-next": "14.2.5",
-    "typescript": "^5.5.4"
+    "eslint-config-next": "^14.2.5",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=18.17"
   }
 }
