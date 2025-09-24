@@ -5,7 +5,7 @@ export function withCORS(
   return async (req: Request) => {
     const origin = req.headers.get("origin") ?? "*";
 
-    // Handle preflight quickly
+    // Preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -14,8 +14,8 @@ export function withCORS(
           "access-control-allow-methods": "GET,POST,OPTIONS",
           "access-control-allow-headers":
             "authorization,content-type,x-bypass-token",
-          "access-control-max-age": "86400",
-        },
+          "access-control-max-age": "86400"
+        }
       });
     }
 
