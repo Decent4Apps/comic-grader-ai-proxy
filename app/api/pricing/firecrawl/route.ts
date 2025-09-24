@@ -32,7 +32,8 @@ type PriceResult = {
   raw: any;
 };
 
-const FIRECRAWL = process.env.FIRECRAWL_BASE_URL?.replace(/\/+$/, "") || "https://api.firecrawl.dev";
+const FIRECRAWL =
+  process.env.FIRECRAWL_BASE_URL?.replace(/\/+$/, "") || "https://api.firecrawl.dev";
 const DEFAULT_TTL = Math.max(300, Number(process.env.PRICING_TTL_SEC || 21600)); // 5m–6h+
 
 async function getSql() {
@@ -88,7 +89,11 @@ async function fetchFirecrawl(query: string) {
     throw new Error(`firecrawl_error ${res.status}: ${text.slice(0, 500)}`);
   }
   const json = await res.json();
-  const items = Array.isArray(json?.data) ? json.data : Array.isArray(json?.results) ? json.results : [];
+  const items = Array.isArray(json?.data)
+    ? json.data
+    : Array.isArray(json?.results)
+    ? json.results
+    : [];
   return items;
 }
 
@@ -99,7 +104,7 @@ export const POST = withCORS(async (req) => {
     const ttl = Math.max(300, Math.min(86400, Number(body?.ttlSeconds ?? DEFAULT_TTL)));
     const key = cacheKey(query);
 
-    // 1) Try cache (NOTE: generic is the row type, not an array)
+    // 1) Try cache (generic is the row shape, not array)
     try {
       const sql = await getSql();
       const rows = await sql<{ payload: any }>`
@@ -119,7 +124,9 @@ export const POST = withCORS(async (req) => {
             expires_at timestamptz not null
           )
         `;
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     // 2) Live fetch
@@ -145,7 +152,9 @@ export const POST = withCORS(async (req) => {
           payload = excluded.payload,
           expires_at = excluded.expires_at
       `;
-    } catch { /* ignore cache errors */ }
+    } catch {
+      /* ignore cache errors */
+    }
 
     return Response.json(payload, { status: 200 });
   } catch (err: any) {
@@ -155,5 +164,14 @@ export const POST = withCORS(async (req) => {
   }
 });
 
+// Optional GET for manual testing: /api/pricing/firecrawl?query=Amazing%20Spider-Man%20%23300
 export const GET = withCORS(async (req) => {
-  const { searchParams }
+  const { searchParams } = new URL(req.url);
+  const query = searchParams.get("query");
+  if (!query) return Response.json({ error: "missing query" }, { status: 400 });
+  const proxyReq = new Request(req, {
+    method: "POST",
+    body: JSON.stringify({ query })
+  });
+  return POST(proxyReq);
+});
