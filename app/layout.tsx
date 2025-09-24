@@ -1,18 +1,15 @@
-import "./globals.css";
-import { Analytics } from "@vercel/analytics/react";
+// app/layout.tsx
+import type { ReactNode } from "react";
 
 export const metadata = {
   title: "Comic Grader AI Proxy",
-  description: "Server-side proxy for Comic Grader AI",
+  description: "Proxy for mobile apps → AI providers",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>
-        {children}
-        <Analytics />
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
