@@ -1,6 +1,6 @@
 // app/api/ai/route.ts
-import { withCORS } from "../_lib/cors";
-import { verifySessionJWT } from "@/src/auth/tokens";
+import { withCORS } from "../_lib/cors"; // keep this path if you used api/_lib/cors.ts
+import { verifySessionJWT } from "@/src/auth/tokens"; // or adjust if your verify lives elsewhere
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -10,19 +10,23 @@ const isProd =
   process.env.VERCEL_ENV === "production" ||
   process.env.NODE_ENV === "production";
 
-// Optional OpenAI firewall (Superagent, etc) — for OpenAI ONLY.
-const SUPERAGENT_PROXY_URL = process.env.SUPERAGENT_PROXY_URL || undefined;
+/**
+ * ENV wiring
+ * - For Anthropic via Superagent firewall: set ANTHROPIC_BASE_URL to your Superagent proxy URL
+ *   (e.g. https://firewall.superagent.sh/j97882v2grrbt5epxb8xtr1pyh7py3re)
+ *   and keep ANTHROPIC_API_KEY as your real Claude key (the firewall forwards it).
+ * - For OpenAI via firewall/gateway (optional): set OPENAI_BASE_URL (or leave empty to hit OpenAI directly).
+ */
+const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || undefined;
+const OPENAI_BASE_URL =
+  process.env.OPENAI_BASE_URL || process.env.SUPERAGENT_PROXY_URL || undefined;
 
-async function requireAuthOrAnon(req: Request) {
+async function gate(req: Request) {
   const auth = req.headers.get("authorization");
   const bypass = req.headers.get("x-bypass-token");
 
-  // In preview/dev, allow an X-Bypass-Token (set BYPASS_TOKEN in Vercel)
-  if (!isProd) {
-    if (bypass && bypass === process.env.BYPASS_TOKEN) return;
-  }
+  if (!isProd && bypass && bypass === process.env.BYPASS_TOKEN) return;
 
-  // Otherwise require a Bearer token (replace verifySessionJWT with your real check)
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -35,8 +39,8 @@ type Msg = { role: "user" | "assistant" | "system"; content: any };
 
 export const POST = withCORS(async (req) => {
   try {
-    const gate = await requireAuthOrAnon(req);
-    if (gate) return gate;
+    const g = await gate(req);
+    if (g) return g;
 
     const body = await req.json();
     const { provider, model, messages, temperature, maxTokens } = body || {};
@@ -48,8 +52,7 @@ export const POST = withCORS(async (req) => {
     if (provider === "openai") {
       const client = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY!,
-        // OK to route OpenAI via a firewall if you use one:
-        baseURL: SUPERAGENT_PROXY_URL || undefined,
+        baseURL: OPENAI_BASE_URL, // optional: route OpenAI through a firewall/gateway
       });
 
       const r = await client.chat.completions.create({
@@ -64,8 +67,12 @@ export const POST = withCORS(async (req) => {
     }
 
     if (provider === "anthropic") {
-      // IMPORTANT: do NOT set baseURL unless your gateway supports Anthropic’s API.
-      const a = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
+      // Superagent supports Anthropic SDK by swapping baseURL to your Superagent proxy URL
+      // per docs: just set baseURL and keep your normal Anthropic API key. :contentReference[oaicite:1]{index=1}
+      const a = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY!,
+        baseURL: ANTHROPIC_BASE_URL, // ← set to your Superagent firewall URL
+      });
 
       const r = await a.messages.create({
         model: model ?? "claude-3-7-sonnet-latest",
@@ -81,9 +88,7 @@ export const POST = withCORS(async (req) => {
       });
 
       const text =
-        Array.isArray(r.content) && (r.content[0] as any)?.text
-          ? (r.content[0] as any).text
-          : "";
+        (Array.isArray(r.content) && (r.content[0] as any)?.text) || "";
       return Response.json({ content: text });
     }
 
