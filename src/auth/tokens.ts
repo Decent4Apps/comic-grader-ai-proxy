@@ -1,6 +1,9 @@
 // src/auth/tokens.ts
-// Minimal “auth” shim so /api/ai can require a bearer in prod
+// Minimal token gate for /api/ai in production.
+// Replace with your real JWT verification when ready.
 export async function verifySessionJWT(token: string): Promise<void> {
   if (!token || token.length < 16) throw new Error("invalid token");
-  // If you have real JWT validation, replace this with your check (e.g. jose.verify)
+  // Example (real check):
+  // import { jwtVerify } from "jose";
+  // await jwtVerify(token, new TextEncoder().encode(process.env.JWT_PUBLIC_KEY!));
 }
