@@ -1,28 +1,17 @@
-import { withCORS } from "@/src/lib/cors";
-import { db } from "@/src/db/client";
-import { otpCodes, users } from "@/src/db/schema";
-import { and, eq, gt } from "drizzle-orm";
-import { createSessionJWT } from "@/src/auth/tokens";
-
+// app/api/auth/verify/route.ts
+import { withCORS } from "../../_lib/cors";
 export const runtime = "nodejs";
 
-export const POST = withCORS(async (req) => {
-  const { email, code } = await req.json();
-  if (!email || !code) return Response.json({ error: "email and code required" }, { status: 400 });
+export const POST = withCORS(async () =>
+  new Response(
+    JSON.stringify({ error: "not_implemented", message: "auth/verify disabled" }),
+    { status: 501, headers: { "content-type": "application/json" } }
+  )
+);
 
-  const now = new Date();
-  const rows = await db.select().from(otpCodes).where(and(
-    eq(otpCodes.email, email),
-    eq(otpCodes.code, code),
-    gt(otpCodes.expiresAt, now)
-  ));
-  if (!rows.length) return Response.json({ error: "invalid code" }, { status: 401 });
-
-  let user = (await db.select().from(users).where(eq(users.email, email)))[0];
-  if (!user) {
-    user = (await db.insert(users).values({ email }).returning())[0];
-  }
-
-  const token = await createSessionJWT(user.id);
-  return Response.json({ token, user: { id: user.id, email: user.email } });
-});
+export const GET = withCORS(async () =>
+  new Response(
+    JSON.stringify({ error: "not_implemented", message: "auth/verify disabled" }),
+    { status: 501, headers: { "content-type": "application/json" } }
+  )
+);
