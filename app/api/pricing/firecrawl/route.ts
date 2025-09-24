@@ -35,7 +35,6 @@ type PriceResult = {
 const FIRECRAWL = process.env.FIRECRAWL_BASE_URL?.replace(/\/+$/, "") || "https://api.firecrawl.dev";
 const DEFAULT_TTL = Math.max(300, Number(process.env.PRICING_TTL_SEC || 21600)); // 5m–6h+
 
-// Lazy import to avoid cold-start cost unless used
 async function getSql() {
   const { neon } = await import("@neondatabase/serverless");
   const url = process.env.DATABASE_URL;
@@ -59,7 +58,6 @@ function cacheKey(q: string): string {
   return "firecrawl:" + crypto.createHash("sha1").update(q.toLowerCase()).digest("hex");
 }
 
-// Very light heuristic: pull $ amounts from titles/snippets and average them.
 function extractAveragePrice(results: any[]): { avg: number | null; count: number } {
   const dollars: number[] = [];
   const rx = /\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)/g;
@@ -80,7 +78,6 @@ function extractAveragePrice(results: any[]): { avg: number | null; count: numbe
 async function fetchFirecrawl(query: string) {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) throw new Error("missing FIRECRAWL_API_KEY");
-  // Prefer search—adjust path if you use a different Firecrawl endpoint
   const res = await fetch(`${FIRECRAWL}/v1/search`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": key },
@@ -91,7 +88,6 @@ async function fetchFirecrawl(query: string) {
     throw new Error(`firecrawl_error ${res.status}: ${text.slice(0, 500)}`);
   }
   const json = await res.json();
-  // Normalize to an array of items with title/snippet/URL if available
   const items = Array.isArray(json?.data) ? json.data : Array.isArray(json?.results) ? json.results : [];
   return items;
 }
@@ -103,32 +99,33 @@ export const POST = withCORS(async (req) => {
     const ttl = Math.max(300, Math.min(86400, Number(body?.ttlSeconds ?? DEFAULT_TTL)));
     const key = cacheKey(query);
 
-    // 1) Try cache
+    // 1) Try cache (NOTE: generic is the row type, not an array)
     try {
       const sql = await getSql();
-      const rows = await sql<
-        { payload: any }[]
-      >`select payload from pricing_cache where key=${key} and expires_at > now() limit 1`;
+      const rows = await sql<{ payload: any }>`
+        select payload from pricing_cache where key=${key} and expires_at > now() limit 1
+      `;
       if (rows.length) {
         return Response.json(rows[0].payload as PriceResult, { status: 200 });
       }
-    } catch (e) {
-      // Best-effort: ensure table exists if first run
+    } catch {
+      // Ensure table exists (best-effort)
       try {
         const sql = await getSql();
-        await sql`create table if not exists pricing_cache (
-          key varchar(200) primary key,
-          payload jsonb not null,
-          expires_at timestamptz not null
-        )`;
-      } catch {/* ignore */}
+        await sql`
+          create table if not exists pricing_cache (
+            key varchar(200) primary key,
+            payload jsonb not null,
+            expires_at timestamptz not null
+          )
+        `;
+      } catch { /* ignore */ }
     }
 
     // 2) Live fetch
     const results = await fetchFirecrawl(query);
     const { avg, count } = extractAveragePrice(results);
 
-    // Trend is unknown without history—mark stable unless null
     const payload: PriceResult = {
       averagePrice: avg,
       sampleSize: count,
@@ -148,7 +145,7 @@ export const POST = withCORS(async (req) => {
           payload = excluded.payload,
           expires_at = excluded.expires_at
       `;
-    } catch {/* ignore cache errors */}
+    } catch { /* ignore cache errors */ }
 
     return Response.json(payload, { status: 200 });
   } catch (err: any) {
@@ -158,14 +155,5 @@ export const POST = withCORS(async (req) => {
   }
 });
 
-// Optional GET for manual testing: /api/pricing/firecrawl?query=Amazing%20Spider-Man%20#300
 export const GET = withCORS(async (req) => {
-  const { searchParams } = new URL(req.url);
-  const query = searchParams.get("query");
-  if (!query) return Response.json({ error: "missing query" }, { status: 400 });
-  const proxyReq = new Request(req, {
-    method: "POST",
-    body: JSON.stringify({ query })
-  });
-  return POST(proxyReq);
-});
+  const { searchParams }
