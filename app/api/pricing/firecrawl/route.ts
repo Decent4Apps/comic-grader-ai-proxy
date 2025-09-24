@@ -104,11 +104,14 @@ export const POST = withCORS(async (req) => {
     const ttl = Math.max(300, Math.min(86400, Number(body?.ttlSeconds ?? DEFAULT_TTL)));
     const key = cacheKey(query);
 
-    // 1) Try cache (generic is the row shape, not array)
+    // 1) Try cache
     try {
       const sql = await getSql();
-      const rows = await sql<{ payload: any }>`
-        select payload from pricing_cache where key=${key} and expires_at > now() limit 1
+      const rows: { payload: any }[] = await sql`
+        select payload
+        from pricing_cache
+        where key=${key} and expires_at > now()
+        limit 1
       `;
       if (rows.length) {
         return Response.json(rows[0].payload as PriceResult, { status: 200 });
@@ -149,8 +152,8 @@ export const POST = withCORS(async (req) => {
         insert into pricing_cache (key, payload, expires_at)
         values (${key}, ${payload as any}, now() + interval '${ttl} seconds')
         on conflict (key) do update set
-          payload = excluded.payload,
-          expires_at = excluded.expires_at
+          payload = EXCLUDED.payload,
+          expires_at = EXCLUDED.expires_at
       `;
     } catch {
       /* ignore cache errors */
