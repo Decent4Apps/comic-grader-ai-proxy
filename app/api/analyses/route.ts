@@ -1,5 +1,5 @@
 // app/api/analyses/route.ts
-import { withCORS } from "../_lib/cors";
+import { withCORS, preflight } from "../_lib/cors";
 export const runtime = "nodejs";
 
 export const GET = withCORS(async () =>
@@ -15,3 +15,5 @@ export const POST = withCORS(async () =>
     headers: { "content-type": "application/json" },
   })
 );
+
+export const OPTIONS = preflight;
