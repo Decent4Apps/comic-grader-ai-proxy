@@ -1,4 +1,6 @@
 // app/api/health/route.ts
+import { preflight } from "../_lib/cors";
+
 export const runtime = "nodejs";
 
 export const GET = async () => {
@@ -15,3 +17,5 @@ export const GET = async () => {
     { status: 200, headers: { "content-type": "application/json" } }
   );
 };
+
+export const OPTIONS = preflight;
