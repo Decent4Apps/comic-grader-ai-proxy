@@ -1,10 +1,19 @@
 // app/api/ai/route.ts
-import { withCORS, preflight } from "../_lib/cors";
 import { verifySessionJWT } from "@/src/auth/tokens";
 
 export const runtime = "nodejs";
 
 const isProd = process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "content-type, authorization, x-bypass-token",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "cache-control": "no-store",
+  };
+}
+export const OPTIONS = async () => new Response(null, { status: 204, headers: corsHeaders() });
 
 async function gate(req: Request) {
   const bypass = req.headers.get("x-bypass-token");
@@ -12,15 +21,25 @@ async function gate(req: Request) {
 
   const auth = req.headers.get("authorization");
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!token) throw Object.assign(new Error("unauthorized"), { status: 401 });
-  await verifySessionJWT(token).catch((e) => {
-    const err = new Error(e?.message || "unauthorized");
+  if (!token) {
+    const err = new Error("missing bearer token");
     (err as any).status = 401;
     throw err;
-  });
+  }
+  try {
+    await verifySessionJWT(token);
+  } catch (e: any) {
+    const reason = e?.message || "token invalid";
+    // SERVER LOG: you’ll see exact cause in Vercel logs
+    console.warn("[/api/ai] 401 verify failed:", reason);
+    const err = new Error(reason);
+    (err as any).status = 401;
+    throw err;
+  }
 }
 
 type Msg = { role: "user" | "assistant" | "system"; content: string };
+
 function ensureBody(obj: any) {
   if (!obj || typeof obj !== "object") throw Object.assign(new Error("bad_request"), { status: 400 });
   const { provider, model, messages, temperature, maxTokens } = obj;
@@ -36,7 +55,7 @@ function ensureBody(obj: any) {
   };
 }
 
-export const POST = withCORS(async (req) => {
+export const POST = async (req: Request) => {
   try {
     await gate(req);
     const { provider, model, temperature, maxTokens, messages } = ensureBody(await req.json());
@@ -56,7 +75,7 @@ export const POST = withCORS(async (req) => {
       const text = r.choices?.[0]?.message?.content ?? "";
       return new Response(JSON.stringify({ ok: true, provider, text }), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...corsHeaders() },
       });
     }
 
@@ -80,25 +99,25 @@ export const POST = withCORS(async (req) => {
       const text = r.content?.[0]?.type === "text" ? r.content[0].text : "";
       return new Response(JSON.stringify({ ok: true, provider, text }), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...corsHeaders() },
       });
     }
 
-    return new Response(JSON.stringify({ error: "unsupported_provider" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "unsupported_provider" }), {
+      status: 400,
+      headers: { "content-type": "application/json", ...corsHeaders() },
+    });
   } catch (err: any) {
     const status = err?.status && err.status >= 400 && err.status < 600 ? err.status : 500;
     return new Response(JSON.stringify({ error: err?.message || "proxy_error" }), {
       status,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...corsHeaders() },
     });
   }
-});
+};
 
-export const GET = withCORS(async () =>
+export const GET = async () =>
   new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
     status: 200,
-    headers: { "content-type": "application/json" },
-  })
-);
-
-export const OPTIONS = preflight;
+    headers: { "content-type": "application/json", ...corsHeaders() },
+  });
