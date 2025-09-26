@@ -1,181 +1,185 @@
 // app/api/pricing/firecrawl/route.ts
-import { withCORS } from "../../_lib/cors";
-import crypto from "node:crypto";
-
 export const runtime = "nodejs";
 
-/**
- * Env required:
- * - FIRECRAWL_API_KEY  (string)
- * - DATABASE_URL       (Neon postgres URL)
- * Optional:
- * - FIRECRAWL_BASE_URL (default https://api.firecrawl.dev)
- * - PRICING_TTL_SEC    (default 21600 = 6h)
- */
-
-type ReqBody =
-  | { query: string; ttlSeconds?: number }
-  | {
-      title?: string;
-      issue?: string | number;
-      publisher?: string;
-      year?: string | number;
-      ttlSeconds?: number;
-    };
-
-type PriceResult = {
-  averagePrice: number | null;
-  sampleSize: number;
-  marketTrend: "up" | "down" | "stable" | null;
-  lastUpdated: string;
-  query: string;
-  raw: any;
+type QueryInput = {
+  title?: string;        // "Amazing Spider-Man"
+  issue?: string | number; // "300"
+  grade?: string;        // "CGC 9.8"
+  rawQuery?: string;     // optional manual override
+  maxResults?: number;   // default 10
+  soldOnly?: boolean;    // default true
+  country?: "US" | "UK" | "DE" | "AU"; // affects ebay domain
 };
 
-const FIRECRAWL =
-  process.env.FIRECRAWL_BASE_URL?.replace(/\/+$/, "") || "https://api.firecrawl.dev";
-const DEFAULT_TTL = Math.max(300, Number(process.env.PRICING_TTL_SEC || 21600)); // 5m–6h+
+const FIRECRAWL_URL = "https://api.firecrawl.dev/v1";
+const API_KEY = process.env.FIRECRAWL_API_KEY;
 
-async function getSql() {
-  const { neon } = await import("@neondatabase/serverless");
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("Missing DATABASE_URL");
-  return neon(url);
-}
-
-function normalizeQuery(b: ReqBody): string {
-  if ("query" in b && b.query) return String(b.query).trim();
-  const parts: string[] = [];
-  if ("title" in b && b.title) parts.push(String(b.title));
-  if ("issue" in b && b.issue) parts.push(`#${b.issue}`);
-  if ("publisher" in b && b.publisher) parts.push(`(${b.publisher})`);
-  if ("year" in b && b.year) parts.push(String(b.year));
-  const q = parts.join(" ").trim();
-  if (!q) throw new Error("missing query");
-  return q;
-}
-
-function cacheKey(q: string): string {
-  return "firecrawl:" + crypto.createHash("sha1").update(q.toLowerCase()).digest("hex");
-}
-
-function extractAveragePrice(results: any[]): { avg: number | null; count: number } {
-  const dollars: number[] = [];
-  const rx = /\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)/g;
-  for (const r of results || []) {
-    const text = `${r?.title ?? ""} ${r?.snippet ?? r?.description ?? ""}`;
-    if (!text) continue;
-    let m;
-    while ((m = rx.exec(text))) {
-      const n = Number(m[1].replace(/,/g, ""));
-      if (Number.isFinite(n) && n > 0 && n < 50000) dollars.push(n);
-    }
+function ebayDomain(country?: QueryInput["country"]) {
+  switch (country) {
+    case "UK": return "ebay.co.uk";
+    case "DE": return "ebay.de";
+    case "AU": return "ebay.com.au";
+    default:   return "ebay.com";
   }
-  if (!dollars.length) return { avg: null, count: 0 };
-  const avg = Math.round((dollars.reduce((a, b) => a + b, 0) / dollars.length) * 100) / 100;
-  return { avg, count: dollars.length };
 }
 
-async function fetchFirecrawl(query: string) {
-  const key = process.env.FIRECRAWL_API_KEY;
-  if (!key) throw new Error("missing FIRECRAWL_API_KEY");
-  const res = await fetch(`${FIRECRAWL}/v1/search`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": key },
-    body: JSON.stringify({ query, limit: 10 })
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`firecrawl_error ${res.status}: ${text.slice(0, 500)}`);
-  }
-  const json = await res.json();
-  const items = Array.isArray(json?.data)
-    ? json.data
-    : Array.isArray(json?.results)
-    ? json.results
-    : [];
-  return items;
+// Build a SERP query that favors sold listings & CGC grades
+function buildQuery(p: QueryInput) {
+  if (p.rawQuery) return p.rawQuery;
+  const bits = [
+    p.title?.trim(),
+    p.issue ? `#${p.issue}` : "",
+    p.grade?.trim(),
+    "site:ebay.com",
+    p.soldOnly !== false ? "sold" : ""
+  ].filter(Boolean);
+  return bits.join(" ").replace(/\s+/g, " ");
 }
 
-export const POST = withCORS(async (req) => {
+// Attempt to coerce a USD value from strings like "$1,234.56" or "US $89.99"
+function parsePrice(s?: string) {
+  if (!s) return null;
+  const m = s.replace(/[^\d.,-]/g, "").match(/[\d.,-]+/g);
+  if (!m) return null;
+  const num = Number(m[0].replace(/,/g, ""));
+  return Number.isFinite(num) ? num : null;
+}
+
+// Simple robust median
+function median(nums: number[]) {
+  if (!nums.length) return null;
+  const a = nums.slice().sort((x,y)=>x-y);
+  const mid = Math.floor(a.length/2);
+  return a.length % 2 ? a[mid] : (a[mid-1] + a[mid]) / 2;
+}
+
+export const POST = async (req: Request) => {
   try {
-    const body = (await req.json().catch(() => ({}))) as ReqBody;
-    const query = normalizeQuery(body);
-    const ttl = Math.max(300, Math.min(86400, Number(body?.ttlSeconds ?? DEFAULT_TTL)));
-    const key = cacheKey(query);
-
-    // 1) Try cache (cast result AFTER the query to avoid generic/constraint issues)
-    try {
-      const sql = await getSql();
-      const rawRows = await sql`
-        select payload
-        from pricing_cache
-        where key=${key} and expires_at > now()
-        limit 1
-      `;
-      const rows = rawRows as unknown as { payload: any }[];
-      if (rows.length) {
-        return Response.json(rows[0].payload as PriceResult, { status: 200 });
-      }
-    } catch {
-      // Ensure table exists (best-effort)
-      try {
-        const sql = await getSql();
-        await sql`
-          create table if not exists pricing_cache (
-            key varchar(200) primary key,
-            payload jsonb not null,
-            expires_at timestamptz not null
-          )
-        `;
-      } catch {
-        /* ignore */
-      }
+    if (!API_KEY) {
+      return new Response(JSON.stringify({ error: "Missing FIRECRAWL_API_KEY" }), { status: 500 });
     }
 
-    // 2) Live fetch
-    const results = await fetchFirecrawl(query);
-    const { avg, count } = extractAveragePrice(results);
+    const body = (await req.json().catch(() => ({}))) as QueryInput;
+    const query = buildQuery(body);
+    const maxResults = Math.min(Math.max(body.maxResults ?? 10, 3), 25);
+    const domain = ebayDomain(body.country);
 
-    const payload: PriceResult = {
-      averagePrice: avg,
-      sampleSize: count,
-      marketTrend: avg == null ? null : "stable",
-      lastUpdated: new Date().toISOString(),
-      query,
-      raw: results
+    // 1) Firecrawl Search -> get top ebay links (optionally scrape summaries)
+    const searchResp = await fetch(`${FIRECRAWL_URL}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Authorization": `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        query: query.replace("site:ebay.com", `site:${domain}`),
+        limit: maxResults,
+        // Get plain SERP; we'll extract later for accuracy
+        scrapeOptions: { formats: [] }
+      }),
+    });
+
+    if (!searchResp.ok) {
+      const err = await searchResp.text();
+      return new Response(JSON.stringify({ error: "firecrawl_search_failed", details: err }), { status: 502 });
+    }
+
+    const searchData = await searchResp.json();
+    const hits: Array<{ url: string; title?: string; description?: string }> =
+      searchData?.data ?? searchData?.results ?? [];
+
+    // Heuristic: keep only ebay item pages and SOLD/completed result pages
+    const ebayUrls = (hits || [])
+      .map(h => h.url)
+      .filter(Boolean)
+      .filter((u: string) => {
+        if (!u.includes(domain)) return false;
+        // prefer individual items and "sold" views
+        return /itm\/|sch\/|bin\/|p\/|bhp\//.test(u) || /LH_Sold|LH_Complete|sold/.test(u);
+      })
+      .slice(0, maxResults);
+
+    if (!ebayUrls.length) {
+      return new Response(JSON.stringify({ ok: true, items: [], stats: null, query }), { status: 200 });
+    }
+
+    // 2) Firecrawl Extract -> structured data from listing pages
+    // We describe what to pull with a JSON-Schema-ish prompt+schema
+    const extractResp = await fetch(`${FIRECRAWL_URL}/extract`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Authorization": `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        urls: ebayUrls,
+        // Tip: you can include enableWebSearch:true to let it supplement—but not necessary here
+        prompt: "Extract eBay listing info. Prefer SOLD/CLOSED prices if present.",
+        schema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  url: { type: "string" },
+                  title: { type: "string" },
+                  priceText: { type: "string" },     // e.g. 'US $1,234.56'
+                  soldPriceText: { type: "string" }, // if present (sold/completed)
+                  condition: { type: "string" },
+                  dateText: { type: "string" },      // 'Aug 21, 2025' etc.
+                },
+                required: ["url", "title"]
+              }
+            }
+          },
+          required: ["items"]
+        }
+      }),
+    });
+
+    if (!extractResp.ok) {
+      const err = await extractResp.text();
+      return new Response(JSON.stringify({ error: "firecrawl_extract_failed", details: err }), { status: 502 });
+    }
+
+    const extractData = await extractResp.json();
+    const rawItems: any[] = extractData?.data?.items || extractData?.items || [];
+
+    // Normalize: choose soldPriceText when available, else priceText
+    const normalized = rawItems.map(it => {
+      const price = parsePrice(it.soldPriceText || it.priceText);
+      return {
+        url: it.url,
+        title: it.title,
+        condition: it.condition || null,
+        dateText: it.dateText || null,
+        price,
+        _raw: it,
+      };
+    }).filter(x => Number.isFinite(x.price));
+
+    const prices = normalized.map(x => x.price as number);
+    const stats = {
+      count: normalized.length,
+      mean: prices.length ? (prices.reduce((a,b)=>a+b,0)/prices.length) : null,
+      median: median(prices),
+      min: prices.length ? Math.min(...prices) : null,
+      max: prices.length ? Math.max(...prices) : null,
+      sample: normalized.slice(0, 20)
     };
 
-    // 3) Save cache
-    try {
-      const sql = await getSql();
-      await sql`
-        insert into pricing_cache (key, payload, expires_at)
-        values (${key}, ${payload as any}, now() + interval '${ttl} seconds')
-        on conflict (key) do update set
-          payload = EXCLUDED.payload,
-          expires_at = EXCLUDED.expires_at
-      `;
-    } catch {
-      /* ignore cache errors */
-    }
-
-    return Response.json(payload, { status: 200 });
-  } catch (err: any) {
-    const msg = err?.message || "unknown error";
-    const status = /missing .*_API_KEY|missing DATABASE_URL|missing query/i.test(msg) ? 400 : 502;
-    return Response.json({ error: "pricing_error", message: msg }, { status });
+    return new Response(JSON.stringify({ ok: true, query, items: normalized, stats }), {
+      status: 200,
+      headers: { "content-type": "application/json", "cache-control": "no-store" }
+    });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: e?.message || "server_error" }), { status: 500 });
   }
-});
+};
 
-// Optional GET for manual testing: /api/pricing/firecrawl?query=Amazing%20Spider-Man%20%23300
-export const GET = withCORS(async (req) => {
-  const { searchParams } = new URL(req.url);
-  const query = searchParams.get("query");
-  if (!query) return Response.json({ error: "missing query" }, { status: 400 });
-  const proxyReq = new Request(req, {
-    method: "POST",
-    body: JSON.stringify({ query })
+export const GET = async () =>
+  new Response(JSON.stringify({ ok: true, message: "Firecrawl pricing endpoint ready" }), {
+    status: 200, headers: { "content-type": "application/json" }
   });
-  return POST(proxyReq);
-});
