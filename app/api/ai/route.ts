@@ -1,20 +1,15 @@
 // app/api/ai/route.ts
 import { withCORS } from "../_lib/cors";
 import { verifySessionJWT } from "@/src/auth/tokens";
-import OpenAI from "openai";
-import Anthropic from "@anthropic-ai/sdk";
 
 export const runtime = "nodejs";
 
 const isProd = process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.SUPERAGENT_PROXY_URL || undefined;
-const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || undefined;
 
 async function gate(req: Request) {
   const bypass = req.headers.get("x-bypass-token");
-  if (!isProd && bypass && process.env.BYPASS_TOKEN && bypass === process.env.BYPASS_TOKEN) {
-    return; // dev bypass
-  }
+  if (!isProd && bypass && process.env.BYPASS_TOKEN && bypass === process.env.BYPASS_TOKEN) return;
+
   const auth = req.headers.get("authorization");
   const token = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) throw Object.assign(new Error("unauthorized"), { status: 401 });
@@ -47,7 +42,11 @@ export const POST = withCORS(async (req) => {
     const { provider, model, temperature, maxTokens, messages } = ensureBody(await req.json());
 
     if (provider === "openai") {
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY!, baseURL: OPENAI_BASE_URL });
+      const { default: OpenAI } = await import("openai");
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY!,
+        baseURL: process.env.OPENAI_BASE_URL || undefined,
+      });
       const r = await openai.chat.completions.create({
         model: model ?? "gpt-4o-mini",
         temperature,
@@ -57,14 +56,20 @@ export const POST = withCORS(async (req) => {
       const text = r.choices?.[0]?.message?.content ?? "";
       return new Response(JSON.stringify({ ok: true, provider, text }), {
         status: 200,
-        headers: { "content-type": "application/json", "cache-control": "no-store" },
+        headers: { "content-type": "application/json" },
       });
     }
 
     if (provider === "anthropic") {
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!, baseURL: ANTHROPIC_BASE_URL });
+      const { default: Anthropic } = await import("@anthropic-ai/sdk");
+      const anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY!,
+        baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
+      });
       const sys = messages.find((m) => m.role === "system")?.content ?? "";
-      const user = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      const user = messages
+        .filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
       const r = await anthropic.messages.create({
         model: model ?? "claude-3-haiku-20240307",
         system: sys || undefined,
@@ -75,7 +80,7 @@ export const POST = withCORS(async (req) => {
       const text = r.content?.[0]?.type === "text" ? r.content[0].text : "";
       return new Response(JSON.stringify({ ok: true, provider, text }), {
         status: 200,
-        headers: { "content-type": "application/json", "cache-control": "no-store" },
+        headers: { "content-type": "application/json" },
       });
     }
 
@@ -92,5 +97,5 @@ export const POST = withCORS(async (req) => {
 export const GET = async () =>
   new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
     status: 200,
-    headers: { "content-type": "application/json", "cache-control": "no-store" },
+    headers: { "content-type": "application/json" },
   });
