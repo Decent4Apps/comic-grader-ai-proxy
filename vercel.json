@@ -4,6 +4,5 @@
       "memory": 512,
       "maxDuration": 10
     }
-  },
-  "ignoreCommand": "git diff --name-only $VERCEL_GIT_COMMIT_REF^ $VERCEL_GIT_COMMIT_REF | grep -E '^(README|docs/|\\.github/|.*\\.md)$' && exit 0 || exit 1"
+  }
 }
