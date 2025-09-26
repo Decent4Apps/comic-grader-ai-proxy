@@ -9,9 +9,9 @@ export const GET = async () => {
       ok: true,
       env: prod ? "production" : "non-production",
       jwtSecret: hasSecret ? "present" : "missing",
-      routes: ["/api/health","/api/auth/anon","/api/ai","/api/events","/api/analyses"],
+      routes: ["/api/health", "/api/auth/anon", "/api/ai", "/api/events", "/api/analyses"],
       ts: new Date().toISOString(),
     }),
-    { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }
+    { status: 200, headers: { "content-type": "application/json" } }
   );
 };
