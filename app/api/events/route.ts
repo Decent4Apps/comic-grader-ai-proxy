@@ -1,5 +1,5 @@
 // app/api/events/route.ts
-import { withCORS } from "../_lib/cors";
+import { withCORS, preflight } from "../_lib/cors";
 
 export const runtime = "nodejs";
 
@@ -51,3 +51,5 @@ export const POST = withCORS(async (req) => {
     return new Response(JSON.stringify({ error: e?.message || "server_error" }), { status: 500 });
   }
 });
+
+export const OPTIONS = preflight;
