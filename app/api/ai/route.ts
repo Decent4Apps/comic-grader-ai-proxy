@@ -6,116 +6,91 @@ import Anthropic from "@anthropic-ai/sdk";
 
 export const runtime = "nodejs";
 
-const isProd =
-  process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
-
-const OPENAI_BASE_URL =
-  process.env.OPENAI_BASE_URL || process.env.SUPERAGENT_PROXY_URL || undefined;
+const isProd = process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.SUPERAGENT_PROXY_URL || undefined;
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || undefined;
 
 async function gate(req: Request) {
-  const auth = req.headers.get("authorization");
   const bypass = req.headers.get("x-bypass-token");
-  if (!isProd && bypass && bypass === process.env.BYPASS_TOKEN) return; // dev-only bypass
-  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
-  await verifySessionJWT(token).catch(() => { throw new Error("unauthorized"); });
+  if (!isProd && bypass && process.env.BYPASS_TOKEN && bypass === process.env.BYPASS_TOKEN) {
+    return; // dev bypass
+  }
+  const auth = req.headers.get("authorization");
+  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) throw Object.assign(new Error("unauthorized"), { status: 401 });
+  await verifySessionJWT(token).catch((e) => {
+    const err = new Error(e?.message || "unauthorized");
+    (err as any).status = 401;
+    throw err;
+  });
 }
 
-type Role = "user" | "assistant" | "system";
-type Msg = { role: Role; content: string };
-
+type Msg = { role: "user" | "assistant" | "system"; content: string };
 function ensureBody(obj: any) {
-  if (!obj || typeof obj !== "object") throw new Error("bad_request");
-  const { provider, model, temperature, maxTokens, messages } = obj;
-  if (!provider) throw new Error("missing provider");
-  if (!Array.isArray(messages) || messages.length === 0) {
-    throw new Error("missing messages");
+  if (!obj || typeof obj !== "object") throw Object.assign(new Error("bad_request"), { status: 400 });
+  const { provider, model, messages, temperature, maxTokens } = obj;
+  if (!Array.isArray(messages) || messages.length === 0 || !messages[0]?.content) {
+    throw Object.assign(new Error("Invalid 'messages'"), { status: 400 });
   }
-  return { provider, model, temperature, maxTokens, messages: messages as Msg[] };
+  return {
+    provider: (provider || "openai") as "openai" | "anthropic",
+    model: model as string | undefined,
+    temperature: typeof temperature === "number" ? temperature : undefined,
+    maxTokens: typeof maxTokens === "number" ? maxTokens : undefined,
+    messages: messages as Msg[],
+  };
 }
 
 export const POST = withCORS(async (req) => {
   try {
-    const g = await gate(req);
-    if (g instanceof Response) return g;
-
-    const body = await req.json();
-    const { provider, model, temperature, maxTokens, messages } = ensureBody(body);
+    await gate(req);
+    const { provider, model, temperature, maxTokens, messages } = ensureBody(await req.json());
 
     if (provider === "openai") {
-      const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY!,
-        baseURL: OPENAI_BASE_URL
-      });
-
-      const resp = await openai.chat.completions.create({
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY!, baseURL: OPENAI_BASE_URL });
+      const r = await openai.chat.completions.create({
         model: model ?? "gpt-4o-mini",
-        temperature: typeof temperature === "number" ? temperature : 0.2,
-        max_tokens: typeof maxTokens === "number" ? maxTokens : undefined,
-        messages: messages.map(m => ({ role: m.role, content: m.content }))
+        temperature,
+        max_tokens: maxTokens,
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
       });
-
-      const choice = resp.choices?.[0];
-      return Response.json({
-        provider: "openai",
-        model: resp.model,
-        finish_reason: choice?.finish_reason,
-        content: choice?.message?.content ?? ""
-      }, { status: 200 });
+      const text = r.choices?.[0]?.message?.content ?? "";
+      return new Response(JSON.stringify({ ok: true, provider, text }), {
+        status: 200,
+        headers: { "content-type": "application/json", "cache-control": "no-store" },
+      });
     }
 
     if (provider === "anthropic") {
-      const anthropic = new Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY!,
-        baseURL: ANTHROPIC_BASE_URL
+      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!, baseURL: ANTHROPIC_BASE_URL });
+      const sys = messages.find((m) => m.role === "system")?.content ?? "";
+      const user = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      const r = await anthropic.messages.create({
+        model: model ?? "claude-3-haiku-20240307",
+        system: sys || undefined,
+        messages: user as any,
+        temperature,
+        max_tokens: maxTokens ?? 256,
       });
-
-      // Extract system prompt; Anthropic expects it separately
-      const systemParts = messages.filter(m => m.role === "system").map(m => m.content);
-      const system = systemParts.length ? systemParts.join("\n\n") : undefined;
-      const chat = messages
-        .filter(m => m.role !== "system")
-        .map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
-
-      const resp = await anthropic.messages.create({
-        model: model ?? "claude-3-7-sonnet-latest",
-        temperature: typeof temperature === "number" ? temperature : 0.2,
-        max_tokens: typeof maxTokens === "number" ? maxTokens : 512,
-        system,
-        messages: chat
-      } as any);
-
-      const text =
-        Array.isArray(resp.content) && resp.content.length
-          ? (resp.content[0] as any).text ?? ""
-          : "";
-      return Response.json({
-        provider: "anthropic",
-        model: resp.model,
-        content: text
-      }, { status: 200 });
+      const text = r.content?.[0]?.type === "text" ? r.content[0].text : "";
+      return new Response(JSON.stringify({ ok: true, provider, text }), {
+        status: 200,
+        headers: { "content-type": "application/json", "cache-control": "no-store" },
+      });
     }
 
-    return Response.json({ error: "provider not implemented" }, { status: 400 });
+    return new Response(JSON.stringify({ error: "unsupported_provider" }), { status: 400 });
   } catch (err: any) {
-    const details =
-      err?.response?.data ||
-      err?.data ||
-      err?.error ||
-      err?.message ||
-      "unknown server error";
-    const status =
-      (err?.status && Number.isInteger(err.status) && err.status >= 400 && err.status < 600)
-        ? err.status
-        : 500;
-    return Response.json({ error: "proxy_error", details }, { status });
+    const status = err?.status && err.status >= 400 && err.status < 600 ? err.status : 500;
+    return new Response(JSON.stringify({ error: err?.message || "proxy_error" }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
   }
 });
 
-export async function GET() {
-  return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
+export const GET = async () =>
+  new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
     status: 200,
-    headers: { "content-type": "application/json", "cache-control": "no-store" }
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
   });
-}
