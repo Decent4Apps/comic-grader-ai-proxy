@@ -1,5 +1,5 @@
 // app/api/ai/route.ts
-import { withCORS } from "../_lib/cors";
+import { withCORS, preflight } from "../_lib/cors";
 import { verifySessionJWT } from "@/src/auth/tokens";
 
 export const runtime = "nodejs";
@@ -94,8 +94,11 @@ export const POST = withCORS(async (req) => {
   }
 });
 
-export const GET = async () =>
+export const GET = withCORS(async () =>
   new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
     status: 200,
     headers: { "content-type": "application/json" },
-  });
+  })
+);
+
+export const OPTIONS = preflight;
