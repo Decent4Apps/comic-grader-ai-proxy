@@ -2,39 +2,47 @@
 // Minimal HS256 JWT issue + verify using Node's crypto (no external deps)
 import crypto from "node:crypto";
 
-function b64urlEncode(obj: any) {
-  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+type JWTPayload = Record<string, any>;
+
+function b64url(obj: any) {
+  return Buffer.from(typeof obj === "string" ? obj : JSON.stringify(obj)).toString("base64url");
 }
-function b64urlDecode<T = any>(b64url: string): T {
-  return JSON.parse(Buffer.from(b64url, "base64url").toString("utf8"));
+function b64urlJSON<T = any>(segment: string): T {
+  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
 }
 
 function requireSecret(): string {
   const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET;
   if (!secret) throw new Error("missing JWT secret (set AUTH_JWT_SECRET)");
+  if (secret.length < 16) throw new Error("JWT secret too short (use 32+ random bytes)");
   return secret;
 }
 
+/** Create a short-lived session token for the app */
 export async function createSessionJWT(
-  claims: Record<string, any>,
+  claims: { sub: string; scope?: string; aud?: string; iss?: string },
   ttlSeconds = 3600
 ): Promise<string> {
+  const secret = requireSecret();
   const now = Math.floor(Date.now() / 1000);
+
   const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
+  const payload: JWTPayload = {
+    sub: claims.sub,
+    scope: claims.scope ?? "app",
+    aud: claims.aud ?? "app",
+    iss: claims.iss ?? "comic-grader-ai-proxy",
     iat: now,
-    exp: now + ttlSeconds,
-    iss: "comic-grader-ai-proxy",
-    ...claims
+    exp: now + Math.max(60, Math.min(ttlSeconds, 24 * 3600)),
   };
 
-  const secret = requireSecret();
-  const h = b64urlEncode(header);
-  const p = b64urlEncode(payload);
+  const h = b64url(header);
+  const p = b64url(payload);
   const sig = crypto.createHmac("sha256", secret).update(`${h}.${p}`).digest("base64url");
   return `${h}.${p}.${sig}`;
 }
 
+/** Verify signature + expiry; throws on failure */
 export async function verifySessionJWT(token: string): Promise<void> {
   const secret = requireSecret();
   if (!token || typeof token !== "string") throw new Error("invalid token");
@@ -44,7 +52,17 @@ export async function verifySessionJWT(token: string): Promise<void> {
   const expected = crypto.createHmac("sha256", secret).update(`${h}.${p}`).digest("base64url");
   if (s !== expected) throw new Error("bad signature");
 
-  const payload = b64urlDecode<Record<string, any>>(p);
+  const payload = b64urlJSON<Record<string, any>>(p);
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp && now >= payload.exp) throw new Error("token expired");
+}
+
+/** Optional helper to read payload safely */
+export function decodeSessionJWT<T = any>(token: string): T | null {
+  try {
+    const [, p] = token.split(".");
+    return b64urlJSON<T>(p);
+  } catch {
+    return null;
+  }
 }
