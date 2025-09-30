@@ -2,43 +2,35 @@
   "name": "comic-grader-ai-proxy",
   "version": "1.0.0",
   "private": true,
-  "description": "Server-side proxy for the Comic Grader app (auth, AI, health, pricing).",
+  "description": "Vercel proxy + Firecrawl pricing endpoint with Superagent Guard for ComicGraderAI",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-3000}",
     "lint": "next lint",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "format": "prettier --check ."
+    "typecheck": "tsc --noEmit",
+    "vercel-build": "next build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.28.0",
-    "@neondatabase/serverless": "^0.9.0",
     "next": "^14.2.5",
-    "openai": "^4.56.0",
-    "react": "18.2.0",
-    "react-dom": "18.2.0"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "superagent-ai": "^0.2.5",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "@types/react": "^18.2.66",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.18",
     "eslint": "^8.57.0",
     "eslint-config-next": "^14.2.5",
-    "prettier": "^3.2.5",
-    "typescript": "^5.4.5"
-  },
-  "engines": {
-    "node": ">=18.17"
-  },
-  "keywords": [
-    "nextjs",
-    "vercel",
-    "proxy",
-    "openai",
-    "anthropic",
-    "serverless",
-    "neon",
-    "api"
-  ],
-  "license": "UNLICENSED"
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.5.4"
+  }
 }
