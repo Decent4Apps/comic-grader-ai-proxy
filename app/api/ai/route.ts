@@ -1,13 +1,19 @@
 // app/api/ai/route.ts
 import type { NextRequest } from "next/server";
 
-/**
- * Superagent Proxy (stateless):
- * - OPENAI_BASE_URL = your Superagent Proxy link (must include /v1)
- * - OPENAI_API_KEY  = your OpenAI sk_ key
- * No SUPERAGENT_* envs in this mode.
- */
 export const runtime = "nodejs";
+
+/** Ensure the base is a stateless Superagent Proxy URL and includes /v1 */
+function normalizeBaseUrl(raw: string) {
+  let base = (raw || "").trim();
+  // Strip trailing slashes
+  base = base.replace(/\/+$/, "");
+  // If someone pasted a route/config URL, this will still "work" syntactically,
+  // but stateless proxy EXPECTS a pure proxy link (no config id). 404s are typical otherwise.
+  // Make sure we have /v1
+  if (!/\/v1$/.test(base)) base += "/v1";
+  return base;
+}
 
 function need(name: string) {
   const v = process.env[name];
@@ -23,19 +29,13 @@ function cors() {
   } as const;
 }
 
-function upstreamUrl() {
-  // OPENAI_BASE_URL should already include /v1 (e.g., https://firewall.superagent.sh/v1)
-  const base = need("OPENAI_BASE_URL").replace(/\/+$/, "");
-  return `${base}/chat/completions`;
-}
-
 export async function OPTIONS() {
   return new Response(null, { status: 204, headers: cors() });
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // Require app's bearer (anon token)
+    // Require app token
     const auth = req.headers.get("authorization") || "";
     if (!auth.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ error: "Missing bearer token" }), {
@@ -55,7 +55,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const url = upstreamUrl();
+    // Build upstream URL safely
+    const base = normalizeBaseUrl(need("OPENAI_BASE_URL")); // must be the PROXY link
+    const url = `${base}/chat/completions`; // append once
+    const key = need("OPENAI_API_KEY");     // sk_... (vendor key)
+
+    // Log once so we can verify the final URL in Vercel logs
+    console.log("[ai-proxy] base:", base);
+    console.log("[ai-proxy] upstream URL:", url);
+
     const timeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -63,7 +71,7 @@ export async function POST(req: NextRequest) {
     const upstream = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${need("OPENAI_API_KEY")}`, // sk_... (stateless proxy)
+        Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
@@ -79,7 +87,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Pass-through JSON or SSE stream
     const headers = new Headers(upstream.headers);
     headers.delete("content-length");
     headers.delete("transfer-encoding");
