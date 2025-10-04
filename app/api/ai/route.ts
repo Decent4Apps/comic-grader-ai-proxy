@@ -1,7 +1,13 @@
 // app/api/ai/route.ts
 import type { NextRequest } from "next/server";
 
-export const runtime = "nodejs"; // serverful; stable for streaming
+/**
+ * Superagent Proxy (stateless):
+ * - OPENAI_BASE_URL = your Superagent Proxy link (must include /v1)
+ * - OPENAI_API_KEY  = your OpenAI sk_ key
+ * No SUPERAGENT_* envs in this mode.
+ */
+export const runtime = "nodejs";
 
 function need(name: string) {
   const v = process.env[name];
@@ -14,11 +20,11 @@ function cors() {
     "Access-Control-Allow-Origin": process.env.ALLOW_ORIGIN || "*",
     "Access-Control-Allow-Headers": "authorization, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-  };
+  } as const;
 }
 
 function upstreamUrl() {
-  // OPENAI_BASE_URL must already include /v1 (Superagent Proxy link)
+  // OPENAI_BASE_URL should already include /v1 (e.g., https://firewall.superagent.sh/v1)
   const base = need("OPENAI_BASE_URL").replace(/\/+$/, "");
   return `${base}/chat/completions`;
 }
@@ -29,7 +35,7 @@ export async function OPTIONS() {
 
 export async function POST(req: NextRequest) {
   try {
-    // Require your app’s bearer token (anon auth)
+    // Require app's bearer (anon token)
     const auth = req.headers.get("authorization") || "";
     if (!auth.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ error: "Missing bearer token" }), {
@@ -52,17 +58,17 @@ export async function POST(req: NextRequest) {
     const url = upstreamUrl();
     const timeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const upstream = await fetch(url, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${need("OPENAI_API_KEY")}`, // sk_... (Proxy stateless)
+        Authorization: `Bearer ${need("OPENAI_API_KEY")}`, // sk_... (stateless proxy)
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
       signal: controller.signal,
-    }).finally(() => clearTimeout(abortTimer));
+    }).finally(() => clearTimeout(timer));
 
     if (!upstream.ok) {
       const detail = await upstream.text().catch(() => upstream.statusText);
@@ -73,6 +79,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Pass-through JSON or SSE stream
     const headers = new Headers(upstream.headers);
     headers.delete("content-length");
     headers.delete("transfer-encoding");
