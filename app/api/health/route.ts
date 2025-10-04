@@ -1,56 +1,80 @@
-// app/api/health/route.ts
+// app/api/ai/route.ts
 import { NextRequest } from "next/server";
 
 export const runtime = "edge";
 
-export async function GET(_req: NextRequest) {
-  const issues: string[] = [];
-  const envOk = !!process.env.SUPERAGENT_API_KEY && !!process.env.SUPERAGENT_BASE_URL;
+function requireEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
+}
 
-  if (!envOk) issues.push("Missing SUPERAGENT_API_KEY or SUPERAGENT_BASE_URL");
-
-  // Optional: quick AI self-test (small, cheap)
-  let aiOk = false;
-  if (envOk) {
-    try {
-      const r = await fetch(new URL("/api/ai", process.env.NEXT_PUBLIC_BASE_URL || "http://localhost"), {
-        // If running on Vercel, you can call the relative path, but for edge runtime we need absolute.
-        // Safer approach: hit the same origin using a relative URL from the client. For server-side: skip this call and
-        // just return envOk. If you keep it, inject base url via env at build (NEXT_PUBLIC_BASE_URL).
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Provide a limited internal bypass if you support it, else remove auth here.
-          // In strict setups, skip AI selftest or require a short-lived service JWT.
-        },
-        body: JSON.stringify({
-          model: process.env.MODEL_DEFAULT || "openai:gpt-4o-mini",
-          messages: [{ role: "user", content: "ping" }],
-        }),
-        cache: "no-store",
-      });
-      aiOk = r.ok;
-      if (!r.ok) issues.push("AI self-test failed");
-    } catch {
-      issues.push("AI self-test error");
-    }
-  }
-
-  const ok = envOk && aiOk;
-
-  return new Response(
-    JSON.stringify({
-      ok,
-      envOk,
-      aiOk,
-      provider: "superagent",
-      modelDefault: process.env.MODEL_DEFAULT || "openai:gpt-4o-mini",
-      issues,
-      ts: new Date().toISOString(),
-    }),
-    {
-      status: ok ? 200 : 500,
-      headers: { "Content-Type": "application/json" },
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": process.env.ALLOW_ORIGIN || "*",
+      "Access-Control-Allow-Headers": "authorization, content-type",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
     },
-  );
+  });
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const SUPERAGENT_API_KEY = requireEnv("SUPERAGENT_API_KEY");
+    const SUPERAGENT_BASE_URL = requireEnv("SUPERAGENT_BASE_URL"); // e.g. https://firewall.superagent.sh/<route>
+
+    // Optional auth check for your app token (keep if you require it)
+    const auth = req.headers.get("authorization") || "";
+    if (!auth.startsWith("Bearer ")) {
+      return new Response(JSON.stringify({ error: "Missing bearer token" }), { status: 401 });
+    }
+
+    // Validate body (at least messages or input)
+    const body = await req.json().catch(() => ({} as any));
+    if (!Array.isArray(body?.messages) || body.messages.length === 0) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Invalid 'messages': include at least one item with non-empty text. Example: { messages: [{ role:'user', content:'Hello'}] }",
+        }),
+        { status: 400 },
+      );
+    }
+
+    // Forward to Superagent (OpenAI-compatible)
+    const upstreamUrl = `${SUPERAGENT_BASE_URL}/chat/completions`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number(process.env.REQUEST_TIMEOUT_MS || 45000));
+
+    const upstream = await fetch(upstreamUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${SUPERAGENT_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    // Pass through status/body/stream
+    const headers = new Headers(upstream.headers);
+    // Normalize CORS + hint header
+    headers.set("Access-Control-Allow-Origin", process.env.ALLOW_ORIGIN || "*");
+    headers.set("X-Proxy-Upstream", "superagent");
+
+    // If upstream streams (text/event-stream), we just pipe it through.
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers,
+    });
+  } catch (err: any) {
+    const status = Number(err?.status || 500);
+    const detail = err?.message || "Proxy error (Superagent)";
+    return new Response(JSON.stringify({ error: "AI proxy error", detail }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
