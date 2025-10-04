@@ -1,39 +1,56 @@
 // app/api/health/route.ts
-export const runtime = "nodejs";
+import { NextRequest } from "next/server";
 
-function shasum(s: string) {
-  // tiny inline sha256 hex (no crypto import needed for a short hash)
-  // NOTE: In Node 18+ you can use crypto.subtle; here we avoid async:
-  const crypto = require("node:crypto") as typeof import("node:crypto");
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
+export const runtime = "edge";
 
-export const GET = async () => {
-  const prod = process.env.VERCEL_ENV === "production" || process.env.NODE_ENV === "production";
-  const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || "";
-  const secretHash = secret ? shasum(secret).slice(0, 12) : "missing";
-  const vercelUrl = process.env.VERCEL_URL || null;
+export async function GET(_req: NextRequest) {
+  const issues: string[] = [];
+  const envOk = !!process.env.SUPERAGENT_API_KEY && !!process.env.SUPERAGENT_BASE_URL;
+
+  if (!envOk) issues.push("Missing SUPERAGENT_API_KEY or SUPERAGENT_BASE_URL");
+
+  // Optional: quick AI self-test (small, cheap)
+  let aiOk = false;
+  if (envOk) {
+    try {
+      const r = await fetch(new URL("/api/ai", process.env.NEXT_PUBLIC_BASE_URL || "http://localhost"), {
+        // If running on Vercel, you can call the relative path, but for edge runtime we need absolute.
+        // Safer approach: hit the same origin using a relative URL from the client. For server-side: skip this call and
+        // just return envOk. If you keep it, inject base url via env at build (NEXT_PUBLIC_BASE_URL).
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Provide a limited internal bypass if you support it, else remove auth here.
+          // In strict setups, skip AI selftest or require a short-lived service JWT.
+        },
+        body: JSON.stringify({
+          model: process.env.MODEL_DEFAULT || "openai:gpt-4o-mini",
+          messages: [{ role: "user", content: "ping" }],
+        }),
+        cache: "no-store",
+      });
+      aiOk = r.ok;
+      if (!r.ok) issues.push("AI self-test failed");
+    } catch {
+      issues.push("AI self-test error");
+    }
+  }
+
+  const ok = envOk && aiOk;
 
   return new Response(
     JSON.stringify({
-      ok: true,
-      env: prod ? "production" : "non-production",
-      secretHash,
-      vercelUrl,
-      routes: ["/api/health", "/api/auth/anon", "/api/ai", "/api/events", "/api/analyses"],
+      ok,
+      envOk,
+      aiOk,
+      provider: "superagent",
+      modelDefault: process.env.MODEL_DEFAULT || "openai:gpt-4o-mini",
+      issues,
       ts: new Date().toISOString(),
     }),
-    { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }
-  );
-};
-
-export const OPTIONS = async () =>
-  new Response(null, {
-    status: 204,
-    headers: {
-      "access-control-allow-origin": "*",
-      "access-control-allow-headers": "content-type, authorization, x-bypass-token",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
-      "cache-control": "no-store",
+    {
+      status: ok ? 200 : 500,
+      headers: { "Content-Type": "application/json" },
     },
-  });
+  );
+}
