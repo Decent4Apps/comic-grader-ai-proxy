@@ -1,56 +1,41 @@
-// app/api/firecrawl/scrape/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import Firecrawl from "firecrawl-sdk";
+
 export const runtime = "nodejs";
 
-const BASE = process.env.FIRECRAWL_BASE || "https://api.firecrawl.dev/v1";
-const KEY = process.env.FIRECRAWL_API_KEY || "";
-const DEFAULT_FORMAT = process.env.FIRECRAWL_DEFAULT_FORMAT || "markdown";
-const DEFAULT_TIMEOUT = Number(process.env.FIRECRAWL_DEFAULT_TIMEOUT || 20000);
+const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
 
-export async function POST(req: Request) {
-  if (!KEY) {
-    return new Response(JSON.stringify({ error: "Missing FIRECRAWL_API_KEY" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
+export async function POST(req: NextRequest) {
+  try {
+    const { url, scrapeOptions } = await req.json();
+
+    if (!url) {
+      return NextResponse.json(
+        { success: false, error: "Body must include { url }" },
+        { status: 400 }
+      );
+    }
+
+    const result = await firecrawl.scrapeUrl(url, {
+      formats: scrapeOptions?.formats ?? ["markdown"],
+      onlyMainContent: scrapeOptions?.onlyMainContent !== false,
+      includeTags: scrapeOptions?.includeTags,
+      excludeTags: scrapeOptions?.excludeTags,
+      maxAge: scrapeOptions?.maxAge ?? 172800000,
+      waitFor: scrapeOptions?.waitFor ?? 0,
+      skipTlsVerification: scrapeOptions?.skipTlsVerification !== false,
+      blockAds: scrapeOptions?.blockAds !== false,
+      removeBase64Images: scrapeOptions?.removeBase64Images !== false,
+      proxy: scrapeOptions?.proxy ?? "auto",
+      storeInCache: scrapeOptions?.storeInCache !== false,
     });
-  }
 
-  const { url, scrapeOptions } = await req.json().catch(() => ({}));
-  if (!url) {
-    return new Response(JSON.stringify({ error: "Body must include { url }" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  const payload = {
-    url,
-    scrapeOptions: {
-      formats: [{ type: DEFAULT_FORMAT }], // markdown | summary | links | json | screenshot
-      timeout: DEFAULT_TIMEOUT,
-      ...scrapeOptions,
-    },
-  };
-
-  const r = await fetch(`${BASE}/scrape`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${KEY}`,
-      "Content-Type": "application/json",
-      "Accept-Encoding": "identity",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await r.text().catch(() => "");
-  if (!r.ok) {
-    return new Response(
-      JSON.stringify({ error: "Firecrawl scrape error", status: r.status, body: text }),
-      { status: 502, headers: { "Content-Type": "application/json" } }
+    return NextResponse.json(result);
+  } catch (err: any) {
+    console.error("[Firecrawl] /scrape error:", err);
+    return NextResponse.json(
+      { success: false, error: err?.message ?? "Scrape failed" },
+      { status: err?.status ?? 500 }
     );
   }
-
-  return new Response(text, {
-    status: 200,
-    headers: { "Content-Type": "application/json", "Content-Encoding": "identity" },
-  });
 }
