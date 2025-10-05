@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
       soldOnly,
       maxResults,
       timeframe,
-      firecrawlOptions,
+      firecrawlOptions
     } = body;
 
     if (!title) {
@@ -27,7 +27,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Build search query optimized for sold listings
     const q = [`"${title}"`];
     if (issue) q.push(`#${issue}`, `issue ${issue}`);
     if (publisher) q.push(publisher);
@@ -36,15 +35,13 @@ export async function POST(req: NextRequest) {
     q.push("comic book");
     if (soldOnly) q.push("sold", "-lot", "-digital");
 
-    // eBay sold/completed semantics in query text
     const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
 
-    // Google time-bounded search parameter
     const tbsMap: Record<string, string> = {
       week: "qdr:w",
       month: "qdr:m",
       quarter: "qdr:m3",
-      year: "qdr:y",
+      year: "qdr:y"
     };
     const tbs = tbsMap[timeframe || "month"];
 
@@ -64,11 +61,10 @@ export async function POST(req: NextRequest) {
         removeBase64Images: true,
         proxy: "auto",
         skipTlsVerification: true,
-        storeInCache: true,
-      },
+        storeInCache: true
+      }
     });
 
-    // Naive price extraction (you can improve later)
     const listings: Array<{
       title: string;
       price: number;
@@ -87,7 +83,7 @@ export async function POST(req: NextRequest) {
           price: parseFloat(priceMatch[1]),
           url: item.url ?? "",
           condition: "Unknown",
-          soldDate: new Date().toISOString(), // You can parse sold date from content later
+          soldDate: new Date().toISOString()
         });
       }
     }
@@ -96,7 +92,7 @@ export async function POST(req: NextRequest) {
       success: true,
       listings,
       count: listings.length,
-      query,
+      query
     });
   } catch (err: any) {
     console.error("[Pricing] /pricing/firecrawl error:", err);
