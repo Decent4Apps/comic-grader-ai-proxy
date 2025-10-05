@@ -1,59 +1,53 @@
-// app/api/firecrawl/search/route.ts
-export const runtime = "nodejs";
+import { NextRequest, NextResponse } from "next/server";
+import Firecrawl from "firecrawl-sdk";
 
-const BASE = process.env.FIRECRAWL_BASE || "https://api.firecrawl.dev/v1";
-const KEY = process.env.FIRECRAWL_API_KEY || "";
-const DEFAULT_FORMAT = process.env.FIRECRAWL_DEFAULT_FORMAT || "markdown";
+export const runtime = "nodejs"; // IMPORTANT: Not Edge
 
-export async function POST(req: Request) {
-  if (!KEY) {
-    return new Response(JSON.stringify({ error: "Missing FIRECRAWL_API_KEY" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
+const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
+
+export async function POST(req: NextRequest) {
+  try {
+    const {
+      query,
+      limit,
+      sources,
+      tbs,
+      scrapeOptions,
+      timeout,
+      ignoreInvalidURLs,
+    } = await req.json();
+
+    // Defaults aligned with your client snippet
+    const result = await firecrawl.search({
+      query,
+      limit: limit ?? 5,
+      sources: sources ?? ["web"],
+      tbs,
+      timeout: timeout ?? 60000,
+      ignoreInvalidURLs: ignoreInvalidURLs !== false,
+      scrapeOptions: scrapeOptions
+        ? {
+            formats: scrapeOptions.formats ?? ["markdown"],
+            onlyMainContent: scrapeOptions.onlyMainContent !== false,
+            includeTags: scrapeOptions.includeTags,
+            excludeTags: scrapeOptions.excludeTags,
+            maxAge: scrapeOptions.maxAge ?? 172800000,
+            waitFor: scrapeOptions.waitFor ?? 0,
+            skipTlsVerification: scrapeOptions.skipTlsVerification !== false,
+            blockAds: scrapeOptions.blockAds !== false,
+            removeBase64Images: scrapeOptions.removeBase64Images !== false,
+            proxy: scrapeOptions.proxy ?? "auto",
+            storeInCache: scrapeOptions.storeInCache !== false,
+          }
+        : undefined,
     });
-  }
 
-  const { query, limit = 5, scrape = true, scrapeOptions } = await req.json().catch(() => ({}));
-  if (!query) {
-    return new Response(JSON.stringify({ error: "Body must include { query }" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  const payload = {
-    query,
-    limit,
-    ...(scrape
-      ? {
-          scrapeOptions: {
-            formats: [{ type: DEFAULT_FORMAT }],
-            ...(scrapeOptions || {}),
-          },
-        }
-      : {}),
-  };
-
-  const r = await fetch(`${BASE}/search`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${KEY}`,
-      "Content-Type": "application/json",
-      "Accept-Encoding": "identity",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await r.text().catch(() => "");
-  if (!r.ok) {
-    return new Response(
-      JSON.stringify({ error: "Firecrawl search error", status: r.status, body: text }),
-      { status: 502, headers: { "Content-Type": "application/json" } }
+    return NextResponse.json(result);
+  } catch (err: any) {
+    console.error("[Firecrawl] /search error:", err);
+    return NextResponse.json(
+      { success: false, error: err?.message ?? "Search failed" },
+      { status: err?.status ?? 500 }
     );
   }
-
-  return new Response(text, {
-    status: 200,
-    headers: { "Content-Type": "application/json", "Content-Encoding": "identity" },
-  });
 }
