@@ -14,24 +14,35 @@ export async function POST(req: NextRequest) {
       tbs,
       scrapeOptions,
       timeout,
-      ignoreInvalidURLs,
+      ignoreInvalidURLs
     } = await req.json();
 
-    const result = await firecrawl.search({
-      query,
-      limit: limit ?? 5,
-      sources: sources ?? ["web"],
+    if (!query || typeof query !== "string") {
+      return NextResponse.json(
+        { success: false, error: "Body must include a string 'query'." },
+        { status: 400 }
+      );
+    }
+
+    const result = await firecrawl.search(query, {
+      limit: typeof limit === "number" ? limit : 5,
+      sources: Array.isArray(sources) && sources.length ? sources : ["web"],
       tbs,
-      timeout: timeout ?? 60000,
+      timeout: typeof timeout === "number" ? timeout : 60000,
       ignoreInvalidURLs: ignoreInvalidURLs !== false,
       scrapeOptions: scrapeOptions
         ? {
-            formats: scrapeOptions.formats ?? ["markdown"],
+            formats:
+              Array.isArray(scrapeOptions.formats) && scrapeOptions.formats.length
+                ? scrapeOptions.formats
+                : ["markdown"],
             onlyMainContent: scrapeOptions.onlyMainContent !== false,
             includeTags: scrapeOptions.includeTags,
             excludeTags: scrapeOptions.excludeTags,
-            maxAge: scrapeOptions.maxAge ?? 172800000,
-            waitFor: scrapeOptions.waitFor ?? 0,
+            maxAge:
+              typeof scrapeOptions.maxAge === "number" ? scrapeOptions.maxAge : 172800000,
+            waitFor:
+              typeof scrapeOptions.waitFor === "number" ? scrapeOptions.waitFor : 0,
             skipTlsVerification: scrapeOptions.skipTlsVerification !== false,
             blockAds: scrapeOptions.blockAds !== false,
             removeBase64Images: scrapeOptions.removeBase64Images !== false,
@@ -43,7 +54,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (err: any) {
-    console.error("[Firecrawl] /search error:", err);
+    console.error("[Firecrawl] /firecrawl/search error:", err);
     return NextResponse.json(
       { success: false, error: err?.message ?? "Search failed" },
       { status: err?.status ?? 500 }
