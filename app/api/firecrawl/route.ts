@@ -9,100 +9,66 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      title,
-      issue,
-      publisher,
-      year,
-      grade,
-      soldOnly,
-      maxResults,
-      timeframe,
-      firecrawlOptions
-    } = body;
+      query,
+      limit,
+      sources,
+      tbs,
+      scrapeOptions,
+      timeout,
+      ignoreInvalidURLs
+    } = body || {};
 
-    if (!title) {
+    if (!query || typeof query !== "string") {
       return NextResponse.json(
-        { success: false, error: "Missing 'title'." },
+        { success: false, error: "Body must include a string 'query'." },
         { status: 400 }
       );
     }
 
-    // Build search query for eBay sold/completed
-    const q = [`"${title}"`];
-    if (issue) q.push(`#${issue}`, `issue ${issue}`);
-    if (publisher) q.push(publisher);
-    if (year) q.push(String(year));
-    if (grade) q.push(String(grade));
-    q.push("comic book");
-    if (soldOnly) q.push("sold", "-lot", "-digital");
-
-    const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
-
-    // Time filter
-    const tbsMap: Record<string, string> = {
-      week: "qdr:w",
-      month: "qdr:m",
-      quarter: "qdr:m3",
-      year: "qdr:y"
-    };
-    const tbs = tbsMap[timeframe || "month"];
-
-    // Firecrawl v2 search
-    const result = await firecrawl.search({
-      query,
-      limit: maxResults ?? 12,
-      sources: ["web"],
-      tbs,
-      scrapeOptions: {
-        formats: firecrawlOptions?.formats ?? ["markdown"],
-        onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
-        includeTags: firecrawlOptions?.includeTags,
-        excludeTags: firecrawlOptions?.excludeTags,
-        maxAge: firecrawlOptions?.maxAge ?? 172800000,
-        waitFor: firecrawlOptions?.waitFor ?? 3000,
-        blockAds: true,
-        removeBase64Images: true,
-        proxy: "auto",
-        skipTlsVerification: true,
-        storeInCache: true
-      }
+    // IMPORTANT: pass query as first arg, options as second
+    const result = await firecrawl.search(query, {
+      limit: typeof limit === "number" ? limit : 5,
+      sources: Array.isArray(sources) && sources.length ? sources : ["web"],
+      tbs, // e.g. "qdr:m" for past month
+      timeout: typeof timeout === "number" ? timeout : 60000,
+      ignoreInvalidURLs: ignoreInvalidURLs !== false,
+      scrapeOptions: scrapeOptions
+        ? {
+            formats:
+              Array.isArray(scrapeOptions.formats) && scrapeOptions.formats.length
+                ? scrapeOptions.formats
+                : ["markdown"],
+            onlyMainContent: scrapeOptions.onlyMainContent !== false,
+            includeTags: scrapeOptions.includeTags,
+            excludeTags: scrapeOptions.excludeTags,
+            maxAge:
+              typeof scrapeOptions.maxAge === "number" ? scrapeOptions.maxAge : 172800000,
+            waitFor:
+              typeof scrapeOptions.waitFor === "number" ? scrapeOptions.waitFor : 0,
+            skipTlsVerification: scrapeOptions.skipTlsVerification !== false,
+            blockAds: scrapeOptions.blockAds !== false,
+            removeBase64Images: scrapeOptions.removeBase64Images !== false,
+            proxy: scrapeOptions.proxy ?? "auto",
+            storeInCache: scrapeOptions.storeInCache !== false
+          }
+        : undefined
     });
 
-    // Basic price extraction (improve later if needed)
-    const listings: Array<{
-      title: string;
-      price: number;
-      url: string;
-      condition: string;
-      soldDate: string;
-    }> = [];
-
-    const items = result?.data?.web ?? [];
-    for (const item of items) {
-      const content = `${item.title ?? ""} ${item.description ?? ""} ${item.markdown ?? ""}`;
-      const m = content.match(/\$(\d{1,6}(?:\.\d{2})?)/);
-      if (m) {
-        listings.push({
-          title: item.title ?? "Unknown",
-          price: parseFloat(m[1]),
-          url: item.url ?? "",
-          condition: "Unknown",
-          soldDate: new Date().toISOString()
-        });
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      listings,
-      count: listings.length,
-      query
-    });
+    return NextResponse.json(result);
   } catch (err: any) {
-    console.error("[Pricing] /pricing/firecrawl error:", err);
+    console.error("[Firecrawl] /api/firecrawl error:", err);
     return NextResponse.json(
-      { success: false, listings: [], error: err?.message ?? "Pricing failed" },
+      { success: false, error: err?.message ?? "Firecrawl request failed" },
       { status: err?.status ?? 500 }
     );
   }
+}
+
+export async function GET() {
+  // Simple health check
+  return NextResponse.json({
+    status: "ok",
+    sdk: "@mendable/firecrawl-js",
+    ts: new Date().toISOString()
+  });
 }
