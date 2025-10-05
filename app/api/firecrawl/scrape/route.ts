@@ -16,21 +16,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // NOTE:
+    // @mendable/firecrawl-js `scrapeUrl(url, options)` does NOT type `maxAge`.
+    // Caching still works with SDK defaults. Remove maxAge to satisfy TS.
     const result = await firecrawl.scrapeUrl(url, {
+      // output formats: "markdown", "html", "links", "screenshot", "summary", "json"
       formats:
-        Array.isArray(scrapeOptions?.formats) && scrapeOptions?.formats.length
-          ? scrapeOptions?.formats
+        Array.isArray(scrapeOptions?.formats) && scrapeOptions.formats.length
+          ? scrapeOptions.formats
           : ["markdown"],
+
+      // Preserve the other commonly-used, typed options
       onlyMainContent: scrapeOptions?.onlyMainContent !== false,
       includeTags: scrapeOptions?.includeTags,
       excludeTags: scrapeOptions?.excludeTags,
-      maxAge:
-        typeof scrapeOptions?.maxAge === "number" ? scrapeOptions?.maxAge : 172800000,
+
+      // Wait for async content (ms). If not provided, default 0.
       waitFor:
-        typeof scrapeOptions?.waitFor === "number" ? scrapeOptions?.waitFor : 0,
+        typeof scrapeOptions?.waitFor === "number" ? scrapeOptions.waitFor : 0,
+
+      // These are booleans that are typed in the SDK options
       skipTlsVerification: scrapeOptions?.skipTlsVerification !== false,
       blockAds: scrapeOptions?.blockAds !== false,
       removeBase64Images: scrapeOptions?.removeBase64Images !== false,
+
+      // Networking / infra
       proxy: scrapeOptions?.proxy ?? "auto",
       storeInCache: scrapeOptions?.storeInCache !== false
     });
