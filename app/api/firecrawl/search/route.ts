@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Firecrawl from "firecrawl-sdk";
 
-export const runtime = "nodejs"; // IMPORTANT: Not Edge
+export const runtime = "nodejs";
 
 const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
 
@@ -17,7 +17,6 @@ export async function POST(req: NextRequest) {
       ignoreInvalidURLs,
     } = await req.json();
 
-    // Defaults aligned with your client snippet
     const result = await firecrawl.search({
       query,
       limit: limit ?? 5,
@@ -37,9 +36,9 @@ export async function POST(req: NextRequest) {
             blockAds: scrapeOptions.blockAds !== false,
             removeBase64Images: scrapeOptions.removeBase64Images !== false,
             proxy: scrapeOptions.proxy ?? "auto",
-            storeInCache: scrapeOptions.storeInCache !== false,
+            storeInCache: scrapeOptions.storeInCache !== false
           }
-        : undefined,
+        : undefined
     });
 
     return NextResponse.json(result);
