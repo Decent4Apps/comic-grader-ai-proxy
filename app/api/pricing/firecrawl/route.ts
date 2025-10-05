@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import Firecrawl from "firecrawl-sdk";
+import Firecrawl from "@mendable/firecrawl-js";
 
 export const runtime = "nodejs";
 
@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Build search query for eBay sold/completed
     const q = [`"${title}"`];
     if (issue) q.push(`#${issue}`, `issue ${issue}`);
     if (publisher) q.push(publisher);
@@ -37,6 +38,7 @@ export async function POST(req: NextRequest) {
 
     const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
 
+    // Time filter
     const tbsMap: Record<string, string> = {
       week: "qdr:w",
       month: "qdr:m",
@@ -45,6 +47,7 @@ export async function POST(req: NextRequest) {
     };
     const tbs = tbsMap[timeframe || "month"];
 
+    // Firecrawl v2 search
     const result = await firecrawl.search({
       query,
       limit: maxResults ?? 12,
@@ -65,6 +68,7 @@ export async function POST(req: NextRequest) {
       }
     });
 
+    // Basic price extraction (improve later if needed)
     const listings: Array<{
       title: string;
       price: number;
@@ -76,11 +80,11 @@ export async function POST(req: NextRequest) {
     const items = result?.data?.web ?? [];
     for (const item of items) {
       const content = `${item.title ?? ""} ${item.description ?? ""} ${item.markdown ?? ""}`;
-      const priceMatch = content.match(/\$(\d{1,6}(?:\.\d{2})?)/);
-      if (priceMatch) {
+      const m = content.match(/\$(\d{1,6}(?:\.\d{2})?)/);
+      if (m) {
         listings.push({
           title: item.title ?? "Unknown",
-          price: parseFloat(priceMatch[1]),
+          price: parseFloat(m[1]),
           url: item.url ?? "",
           condition: "Unknown",
           soldDate: new Date().toISOString()
