@@ -1,38 +1,56 @@
 export const runtime = "edge";
 
-const FIREWALL_BASE = process.env.SUPERAGENT_PROXY_URL; // e.g. https://firewall.superagent.sh/<FIREWALL_ID>/v1
-const FIREWALL_AUTH_MODE = process.env.SUPERAGENT_AUTH_MODE || "openai"; 
-// "openai" -> use OPENAI_API_KEY as Bearer
-// "proxy"  -> use SUPERAGENT_PROXY_KEY as Bearer
+/**
+ * REQUIRED ENVS (see .env.example):
+ * - SUPERAGENT_PROXY_URL: e.g. https://firewall.superagent.sh/<FIREWALL_ID>/v1
+ * - OPENAI_API_KEY:       e.g. sk-...
+ *
+ * Optional:
+ * - DEFAULT_MODEL: e.g. gpt-4o-mini
+ */
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const SUPERAGENT_PROXY_KEY = process.env.SUPERAGENT_PROXY_KEY || "";
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
 
-// Choose the Authorization header based on mode
-function getBearer(): string {
-  if (FIREWALL_AUTH_MODE === "proxy") {
-    if (!SUPERAGENT_PROXY_KEY) throw new Error("Missing SUPERAGENT_PROXY_KEY");
-    return `Bearer ${SUPERAGENT_PROXY_KEY}`;
+// Normalize base to ensure it has exactly one trailing /v1 (no doubles)
+function normalizeFirewallBase(raw?: string): string {
+  if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
+  let url = raw.trim();
+  // strip any trailing slashes
+  url = url.replace(/\/+$/, "");
+  // ensure it ends with /v1
+  if (!/\/v1$/.test(url)) url += "/v1";
+  return url;
+}
+
+function getUpstreamUrl() {
+  const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
+  return `${base}/chat/completions`;
+}
+
+// Always use OpenAI-compat auth for this handler:
+function getAuthHeader() {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || !key.startsWith("sk-")) {
+    throw new Error("OPENAI_API_KEY missing or invalid (must start with 'sk-').");
   }
-  if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
-  return `Bearer ${OPENAI_API_KEY}`;
+  return `Bearer ${key}`;
 }
 
 export async function POST(req: Request) {
   try {
-    if (!FIREWALL_BASE) {
-      return new Response(JSON.stringify({ error: "Missing SUPERAGENT_PROXY_URL" }), { status: 500 });
-    }
+    const upstreamUrl = getUpstreamUrl();
 
+    // Validate body
     const body = await req.json().catch(() => ({}));
     const { messages, model, temperature, max_tokens, stream } = body || {};
-
     if (!Array.isArray(messages) || messages.length === 0) {
-      return new Response(JSON.stringify({ error: "Invalid messages[]" }), { status: 400 });
+      return new Response(JSON.stringify({ error: "Invalid 'messages': supply non-empty array." }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
-    // For initial debug, force non-streaming to avoid gzip/parse traps
+    // Force non-stream for debug while you stabilize
     const payload = {
       model: model || DEFAULT_MODEL,
       messages,
@@ -42,33 +60,66 @@ export async function POST(req: Request) {
     };
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
-    const upstream = await fetch(`${FIREWALL_BASE}/chat/completions`, {
+    const res = await fetch(upstreamUrl, {
       method: "POST",
       signal: controller.signal,
       headers: {
-        "Authorization": getBearer(),
+        "Authorization": getAuthHeader(),          // <-- MUST be OPENAI key for OpenAI-compat
         "Content-Type": "application/json",
-        // Avoid compressed responses during debug; RN sometimes fails to decompress
-        "Accept-Encoding": "identity",
+        "Accept-Encoding": "identity",             // Avoid RN gzip parse issues while debugging
       },
       body: JSON.stringify(payload),
     }).finally(() => clearTimeout(timeoutId));
 
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => "");
+    const txt = await res.text().catch(() => "");
+    const hdrs: Record<string, string> = {};
+    res.headers.forEach((v, k) => (hdrs[k] = v));
+
+    if (!res.ok) {
+      // Bubble up ALL the context so you can see exactly what's wrong
       return new Response(
-        JSON.stringify({
-          error: "Upstream (Superagent) error",
-          status: upstream.status,
-          detail: text || "No body",
-        }),
+        JSON.stringify(
+          {
+            error: "Upstream (Superagent) error",
+            status: res.status,
+            upstreamUrl,
+            request: {
+              model: payload.model,
+              stream: payload.stream,
+            },
+            responseHeaders: hdrs,
+            body: txt || "No body",
+          },
+          null,
+          2
+        ),
+        { status: res.status === 404 ? 502 : 502, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Success: return JSON directly
+    let json: any = {};
+    try {
+      json = txt ? JSON.parse(txt) : {};
+    } catch {
+      // If Superagent replied with compressed or non-JSON unexpectedly
+      return new Response(
+        JSON.stringify(
+          {
+            error: "Invalid JSON from upstream",
+            upstreamUrl,
+            responseHeaders: hdrs,
+            bodyPreview: txt.slice(0, 400),
+          },
+          null,
+          2
+        ),
         { status: 502, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    const json = await upstream.json();
     return new Response(JSON.stringify(json), {
       status: 200,
       headers: {
@@ -81,10 +132,16 @@ export async function POST(req: Request) {
     const msg = err?.message || String(err);
     const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
     return new Response(
-      JSON.stringify({
-        error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
-        detail: msg,
-      }),
+      JSON.stringify(
+        {
+          error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
+          detail: msg,
+          hint:
+            "Confirm SUPERAGENT_PROXY_URL ends with /v1 (exactly once) and OPENAI_API_KEY is present.",
+        },
+        null,
+        2
+      ),
       { status: isAbort ? 504 : 500, headers: { "Content-Type": "application/json" } }
     );
   }
