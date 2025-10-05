@@ -1,16 +1,10 @@
-// app/api/ai/route.ts
 import type { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
 
-/** Ensure the base is a stateless Superagent Proxy URL and includes /v1 */
+/** Ensure the base is a Superagent Proxy URL and includes /v1 */
 function normalizeBaseUrl(raw: string) {
-  let base = (raw || "").trim();
-  // Strip trailing slashes
-  base = base.replace(/\/+$/, "");
-  // If someone pasted a route/config URL, this will still "work" syntactically,
-  // but stateless proxy EXPECTS a pure proxy link (no config id). 404s are typical otherwise.
-  // Make sure we have /v1
+  let base = (raw || "").trim().replace(/\/+$/, "");
   if (!/\/v1$/.test(base)) base += "/v1";
   return base;
 }
@@ -35,7 +29,7 @@ export async function OPTIONS() {
 
 export async function POST(req: NextRequest) {
   try {
-    // Require app token
+    // Require app's anon bearer
     const auth = req.headers.get("authorization") || "";
     if (!auth.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ error: "Missing bearer token" }), {
@@ -55,12 +49,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Build upstream URL safely
-    const base = normalizeBaseUrl(need("OPENAI_BASE_URL")); // must be the PROXY link
-    const url = `${base}/chat/completions`; // append once
-    const key = need("OPENAI_API_KEY");     // sk_... (vendor key)
+    const base = normalizeBaseUrl(need("OPENAI_BASE_URL")); // REAL Superagent Proxy link
+    const url = `${base}/chat/completions`;                 // append exactly once
+    const key = need("OPENAI_API_KEY");                     // sk_ (vendor key)
 
-    // Log once so we can verify the final URL in Vercel logs
+    // Log once so we can verify the exact URL in Vercel logs
     console.log("[ai-proxy] base:", base);
     console.log("[ai-proxy] upstream URL:", url);
 
@@ -71,8 +64,9 @@ export async function POST(req: NextRequest) {
     const upstream = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${key}`,      // vendor key (stateless)
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",       // ask upstream NOT to compress
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -87,12 +81,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Pass-through body (JSON or SSE) but force no compression to clients
     const headers = new Headers(upstream.headers);
     headers.delete("content-length");
     headers.delete("transfer-encoding");
+    headers.delete("content-encoding");                  // strip any gzip from upstream
+    headers.set("Content-Encoding", "identity");         // ensure RN gets plain bytes
+    headers.set("Cache-Control", "no-transform");        // discourage re-compression
     headers.set("Access-Control-Allow-Origin", process.env.ALLOW_ORIGIN || "*");
     headers.set("X-Proxy-Upstream", "superagent-proxy");
-    headers.set("Content-Type", headers.get("content-type") || "application/json; charset=utf-8");
+    // keep upstream content-type if present; else default JSON
+    headers.set(
+      "Content-Type",
+      headers.get("content-type") || "application/json; charset=utf-8",
+    );
 
     return new Response(upstream.body, { status: upstream.status, headers });
   } catch (err: any) {
