@@ -16,33 +16,33 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // NOTE:
-    // @mendable/firecrawl-js `scrapeUrl(url, options)` does NOT type `maxAge`.
-    // Caching still works with SDK defaults. Remove maxAge to satisfy TS.
+    /**
+     * NOTE: For @mendable/firecrawl-js `scrapeUrl(url, options)` the SDK typing
+     * does NOT include some fields (e.g., maxAge, storeInCache). Passing them
+     * causes TS errors. We only pass commonly-typed safe fields below.
+     *
+     * If you need cache control, use the `search(query, { scrapeOptions: { maxAge } })`
+     * path instead; `maxAge` is typed on that code path in the SDK.
+     */
     const result = await firecrawl.scrapeUrl(url, {
-      // output formats: "markdown", "html", "links", "screenshot", "summary", "json"
+      // Output formats: "markdown", "html", "links", "screenshot", "summary", "json"
       formats:
         Array.isArray(scrapeOptions?.formats) && scrapeOptions.formats.length
           ? scrapeOptions.formats
           : ["markdown"],
 
-      // Preserve the other commonly-used, typed options
+      // Keep to safe, typed fields
       onlyMainContent: scrapeOptions?.onlyMainContent !== false,
       includeTags: scrapeOptions?.includeTags,
       excludeTags: scrapeOptions?.excludeTags,
 
-      // Wait for async content (ms). If not provided, default 0.
+      // Wait for async content (ms)
       waitFor:
         typeof scrapeOptions?.waitFor === "number" ? scrapeOptions.waitFor : 0,
 
-      // These are booleans that are typed in the SDK options
-      skipTlsVerification: scrapeOptions?.skipTlsVerification !== false,
+      // Booleans that are typed in the SDK
       blockAds: scrapeOptions?.blockAds !== false,
-      removeBase64Images: scrapeOptions?.removeBase64Images !== false,
-
-      // Networking / infra
-      proxy: scrapeOptions?.proxy ?? "auto",
-      storeInCache: scrapeOptions?.storeInCache !== false
+      removeBase64Images: scrapeOptions?.removeBase64Images !== false
     });
 
     return NextResponse.json(result);
