@@ -1,148 +1,138 @@
-import { NextRequest, NextResponse } from "next/server";
-import Firecrawl from "@mendable/firecrawl-js";
-
+// app/api/ai/route.ts
 export const runtime = "nodejs";
+export const maxDuration = 10; // be explicit on Node func max runtime
 
-const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
 
-// Allowed formats per SDK
-const ALLOWED_FORMATS = new Set([
-  "markdown",
-  "html",
-  "rawHtml",
-  "links",
-  "screenshot",
-  "screenshot@fullPage",
-  "extract",
-  "json",
-]);
-
-type Doc = {
-  title?: string;
-  url?: string;
-  description?: string;
-  markdown?: string;
-};
-
-function sanitizeFormats(input: any): string[] {
-  // Accept: string[] | [{format:'markdown'}] | [{type:'markdown'}] | mixed
-  const arr = Array.isArray(input) ? input : [];
-  const out: string[] = [];
-  for (const entry of arr) {
-    let val: any = entry;
-    if (entry && typeof entry === "object") {
-      // common shapes: { format: 'markdown' } or { type: 'markdown' } or { value: 'markdown' }
-      val = entry.format ?? entry.type ?? entry.value ?? entry.name;
-    }
-    if (typeof val === "string" && ALLOWED_FORMATS.has(val)) {
-      out.push(val);
-    }
-  }
-  return out.length ? out : ["markdown"];
+function normalizeFirewallBase(raw?: string): string {
+  if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
+  let url = raw.trim().replace(/\/+$/, "");
+  if (!/\/v1$/i.test(url)) url += "/v1";
+  return url;
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const {
-      title,
-      issue,
-      publisher,
-      year,
-      grade,
-      soldOnly,
-      maxResults,
-      timeframe,
-      firecrawlOptions
-    } = body || {};
+function getAuthHeader(): string {
+  const key = process.env.OPENAI_API_KEY || "";
+  if (!key.startsWith("sk-")) {
+    throw new Error("OPENAI_API_KEY missing or invalid (must start with 'sk-').");
+  }
+  return `Bearer ${key}`;
+}
 
-    if (!title) {
-      return NextResponse.json(
-        { success: false, error: "Missing 'title'." },
-        { status: 400 }
+export async function POST(req: Request) {
+  const started = Date.now();
+
+  try {
+    const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
+    const upstreamUrl = `${base}/chat/completions`;
+
+    const body = await req.json().catch(() => ({}));
+    const { messages, model, temperature, max_tokens } = body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return new Response(JSON.stringify({ error: "Invalid 'messages': provide a non-empty array." }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const payload = {
+      model: model || DEFAULT_MODEL,
+      messages,
+      temperature: typeof temperature === "number" ? temperature : 0.7,
+      max_tokens: typeof max_tokens === "number" ? max_tokens : undefined,
+      stream: false,
+    };
+
+    // Abort before Vercel's 10s hard limit
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8500);
+
+    const res = await fetch(upstreamUrl, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: getAuthHeader(),
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+      },
+      body: JSON.stringify(payload),
+    }).finally(() => clearTimeout(timeout));
+
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      return new Response(
+        JSON.stringify(
+          {
+            error: "Upstream (Superagent) error",
+            status: res.status,
+            took_ms: Date.now() - started,
+            upstreamUrl,
+            request: { model: payload.model, stream: payload.stream },
+            body: text || "No body",
+          },
+          null,
+          2
+        ),
+        { status: 502, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Build search query for eBay sold/completed
-    const q: string[] = [`"${title}"`];
-    if (issue) q.push(`#${issue}`, `issue ${issue}`);
-    if (publisher) q.push(String(publisher));
-    if (year) q.push(String(year));
-    if (grade) q.push(String(grade));
-    q.push("comic book");
-    if (soldOnly) q.push("sold", "-lot", "-digital");
-
-    const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
-
-    // Google time filter (TBS)
-    const tbsMap: Record<string, string> = {
-      week: "qdr:w",
-      month: "qdr:m",
-      quarter: "qdr:m3",
-      year: "qdr:y",
-    };
-    const tbs = tbsMap[timeframe || "month"];
-
-    // ---- IMPORTANT: sanitize formats to strings Firecrawl accepts ----
-    const formats = sanitizeFormats(firecrawlOptions?.formats);
-
-    // Firecrawl v2 search — RETURNS ARRAY OF DOCS
-    const docsUnknown = await firecrawl.search(query, {
-      limit: typeof maxResults === "number" ? maxResults : 12,
-      sources: ["web"],
-      tbs,
-      scrapeOptions: {
-        formats,
-        onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
-        includeTags: firecrawlOptions?.includeTags,
-        excludeTags: firecrawlOptions?.excludeTags,
-        waitFor:
-          typeof firecrawlOptions?.waitFor === "number" ? firecrawlOptions.waitFor : 3000,
-        blockAds: true,
-        removeBase64Images: true,
-        proxy: "auto",
-        skipTlsVerification: true,
-        storeInCache: true,
-      },
-    });
-
-    // Normalize strictly to Doc[]
-    const items: Doc[] = Array.isArray(docsUnknown) ? (docsUnknown as Doc[]) : [];
-
-    // Extract simple $price from title/desc/markdown
-    const listings: Array<{
-      title: string;
-      price: number;
-      url: string;
-      condition: string;
-      soldDate: string;
-    }> = [];
-
-    for (const item of items) {
-      const content = `${item.title ?? ""} ${item.description ?? ""} ${item.markdown ?? ""}`;
-      const m = content.match(/\$(\d{1,6}(?:\.\d{2})?)/);
-      if (m) {
-        listings.push({
-          title: item.title ?? "Unknown",
-          price: parseFloat(m[1]),
-          url: item.url ?? "",
-          condition: "Unknown",
-          soldDate: new Date().toISOString(),
-        });
-      }
+    let json: any = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      return new Response(
+        JSON.stringify(
+          {
+            error: "Invalid JSON from upstream",
+            took_ms: Date.now() - started,
+            upstreamUrl,
+            bodyPreview: text.slice(0, 400),
+          },
+          null,
+          2
+        ),
+        { status: 502, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    return NextResponse.json({
-      success: true,
-      listings,
-      count: listings.length,
-      query,
+    return new Response(JSON.stringify(json), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Encoding": "identity",
+        "Cache-Control": "no-store",
+      },
     });
   } catch (err: any) {
-    console.error("[Pricing] /pricing/firecrawl error:", err);
-    return NextResponse.json(
-      { success: false, listings: [], error: err?.message ?? "Pricing failed" },
-      { status: err?.status ?? 500 }
+    const msg = err?.message || String(err);
+    const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
+    return new Response(
+      JSON.stringify(
+        {
+          error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
+          detail: msg,
+        },
+        null,
+        2
+      ),
+      { status: isAbort ? 504 : 500, headers: { "Content-Type": "application/json" } }
     );
   }
+}
+
+export async function GET() {
+  return new Response(
+    JSON.stringify(
+      {
+        status: "ok",
+        modelDefault: DEFAULT_MODEL,
+        ts: new Date().toISOString(),
+      },
+      null,
+      2
+    ),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
 }
