@@ -9,7 +9,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const SUPERAGENT_PROXY_KEY = process.env.SUPERAGENT_PROXY_KEY || "";
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
 
-function bearer() {
+// Choose the Authorization header based on mode
+function getBearer(): string {
   if (FIREWALL_AUTH_MODE === "proxy") {
     if (!SUPERAGENT_PROXY_KEY) throw new Error("Missing SUPERAGENT_PROXY_KEY");
     return `Bearer ${SUPERAGENT_PROXY_KEY}`;
@@ -31,7 +32,7 @@ export async function POST(req: Request) {
       return new Response(JSON.stringify({ error: "Invalid messages[]" }), { status: 400 });
     }
 
-    // For initial debug, disable stream to simplify gzip/transport issues.
+    // For initial debug, force non-streaming to avoid gzip/parse traps
     const payload = {
       model: model || DEFAULT_MODEL,
       messages,
@@ -41,51 +42,50 @@ export async function POST(req: Request) {
     };
 
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 20000); // 20s debug timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s
 
-    const res = await fetch(`${FIREWALL_BASE}/chat/completions`, {
+    const upstream = await fetch(`${FIREWALL_BASE}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
       headers: {
-        "Authorization": bearer(),
+        "Authorization": getBearer(),
         "Content-Type": "application/json",
-        // Prevent gzipped payloads while debugging client parse errors:
+        // Avoid compressed responses during debug; RN sometimes fails to decompress
         "Accept-Encoding": "identity",
       },
       body: JSON.stringify(payload),
-      // Edge runtime ignores some node fetch options; this keeps it simple.
-    }).catch((e) => {
-      throw new Error(`Upstream fetch error: ${e.message || e}`);
-    }).finally(() => clearTimeout(id));
+    }).finally(() => clearTimeout(timeoutId));
 
-    // Surface firewall 4xx/5xx with body for easier diagnosis
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      return new Response(JSON.stringify({
-        error: "Upstream (Superagent) error",
-        status: res.status,
-        detail: text || "No body",
-      }), { status: 502 });
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => "");
+      return new Response(
+        JSON.stringify({
+          error: "Upstream (Superagent) error",
+          status: upstream.status,
+          detail: text || "No body",
+        }),
+        { status: 502, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    // Return JSON straight through
-    const json = await res.json();
+    const json = await upstream.json();
     return new Response(JSON.stringify(json), {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        // Send identity to keep RN happy during debug
         "Content-Encoding": "identity",
         "Cache-Control": "no-store",
       },
     });
   } catch (err: any) {
     const msg = err?.message || String(err);
-    // Map aborts/timeouts to 504 for clarity
     const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
-    return new Response(JSON.stringify({
-      error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
-      detail: msg,
-    }), { status: isAbort ? 504 : 500 });
+    return new Response(
+      JSON.stringify({
+        error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
+        detail: msg,
+      }),
+      { status: isAbort ? 504 : 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 }
