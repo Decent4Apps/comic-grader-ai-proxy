@@ -1,4 +1,3 @@
-// app/api/pricing/firecrawl/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import Firecrawl from "@mendable/firecrawl-js";
 
@@ -6,12 +5,41 @@ export const runtime = "nodejs";
 
 const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
 
+// Allowed formats per SDK
+const ALLOWED_FORMATS = new Set([
+  "markdown",
+  "html",
+  "rawHtml",
+  "links",
+  "screenshot",
+  "screenshot@fullPage",
+  "extract",
+  "json",
+]);
+
 type Doc = {
   title?: string;
   url?: string;
   description?: string;
   markdown?: string;
 };
+
+function sanitizeFormats(input: any): string[] {
+  // Accept: string[] | [{format:'markdown'}] | [{type:'markdown'}] | mixed
+  const arr = Array.isArray(input) ? input : [];
+  const out: string[] = [];
+  for (const entry of arr) {
+    let val: any = entry;
+    if (entry && typeof entry === "object") {
+      // common shapes: { format: 'markdown' } or { type: 'markdown' } or { value: 'markdown' }
+      val = entry.format ?? entry.type ?? entry.value ?? entry.name;
+    }
+    if (typeof val === "string" && ALLOWED_FORMATS.has(val)) {
+      out.push(val);
+    }
+  }
+  return out.length ? out : ["markdown"];
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -51,9 +79,12 @@ export async function POST(req: NextRequest) {
       week: "qdr:w",
       month: "qdr:m",
       quarter: "qdr:m3",
-      year: "qdr:y"
+      year: "qdr:y",
     };
     const tbs = tbsMap[timeframe || "month"];
+
+    // ---- IMPORTANT: sanitize formats to strings Firecrawl accepts ----
+    const formats = sanitizeFormats(firecrawlOptions?.formats);
 
     // Firecrawl v2 search — RETURNS ARRAY OF DOCS
     const docsUnknown = await firecrawl.search(query, {
@@ -61,10 +92,7 @@ export async function POST(req: NextRequest) {
       sources: ["web"],
       tbs,
       scrapeOptions: {
-        formats:
-          Array.isArray(firecrawlOptions?.formats) && firecrawlOptions.formats.length
-            ? firecrawlOptions.formats
-            : ["markdown"],
+        formats,
         onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
         includeTags: firecrawlOptions?.includeTags,
         excludeTags: firecrawlOptions?.excludeTags,
@@ -74,13 +102,14 @@ export async function POST(req: NextRequest) {
         removeBase64Images: true,
         proxy: "auto",
         skipTlsVerification: true,
-        storeInCache: true
-      }
+        storeInCache: true,
+      },
     });
 
     // Normalize strictly to Doc[]
     const items: Doc[] = Array.isArray(docsUnknown) ? (docsUnknown as Doc[]) : [];
 
+    // Extract simple $price from title/desc/markdown
     const listings: Array<{
       title: string;
       price: number;
@@ -98,7 +127,7 @@ export async function POST(req: NextRequest) {
           price: parseFloat(m[1]),
           url: item.url ?? "",
           condition: "Unknown",
-          soldDate: new Date().toISOString()
+          soldDate: new Date().toISOString(),
         });
       }
     }
@@ -107,7 +136,7 @@ export async function POST(req: NextRequest) {
       success: true,
       listings,
       count: listings.length,
-      query
+      query,
     });
   } catch (err: any) {
     console.error("[Pricing] /pricing/firecrawl error:", err);
