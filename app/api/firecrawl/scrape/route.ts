@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
 
     const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
 
-    // Google time filter code (TBS)
+    // Google time filter (TBS)
     const tbsMap: Record<string, string> = {
       week: "qdr:w",
       month: "qdr:m",
@@ -54,34 +54,32 @@ export async function POST(req: NextRequest) {
     };
     const tbs = tbsMap[timeframe || "month"];
 
-    // Firecrawl v2 search (IMPORTANT: query is arg #1, options are arg #2)
+    // Firecrawl v2 search — note: returns an ARRAY of documents
     const result = await firecrawl.search(query, {
       limit: typeof maxResults === "number" ? maxResults : 12,
       sources: ["web"],
       tbs,
       scrapeOptions: {
-        // markdown gives us text to parse prices from
-        formats: Array.isArray(firecrawlOptions?.formats) && firecrawlOptions.formats.length
-          ? firecrawlOptions.formats
-          : ["markdown"],
+        formats:
+          Array.isArray(firecrawlOptions?.formats) && firecrawlOptions.formats.length
+            ? firecrawlOptions.formats
+            : ["markdown"],
         onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
         includeTags: firecrawlOptions?.includeTags,
         excludeTags: firecrawlOptions?.excludeTags,
-        // wait a bit for dynamic sections
-        waitFor: typeof firecrawlOptions?.waitFor === "number" ? firecrawlOptions.waitFor : 3000,
+        waitFor:
+          typeof firecrawlOptions?.waitFor === "number" ? firecrawlOptions.waitFor : 3000,
         blockAds: true,
         removeBase64Images: true,
-        // leave network-related extras to defaults; search() already handles caching/maxAge typing
         proxy: "auto",
         skipTlsVerification: true,
         storeInCache: true
       }
     });
 
-    // New SDK returns an array of docs
+    // New SDK shape: result is Doc[]
     const items: Doc[] = Array.isArray(result) ? (result as Doc[]) : [];
 
-    // Extract simple $price from title/desc/markdown (keep as-is; refine later)
     const listings: Array<{
       title: string;
       price: number;
