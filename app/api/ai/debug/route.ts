@@ -1,15 +1,16 @@
-export const runtime = "edge";
+// app/api/ai/debug/route.ts
+export const runtime = "nodejs";
 
 function normalizeFirewallBase(raw?: string): string {
   if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
   let url = raw.trim().replace(/\/+$/, "");
-  if (!/\/v1$/.test(url)) url += "/v1";
+  if (!/\/v1$/i.test(url)) url += "/v1";
   return url;
 }
 
-function getAuthHeader() {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key || !key.startsWith("sk-")) {
+function getAuthHeader(): string {
+  const key = process.env.OPENAI_API_KEY || "";
+  if (!key.startsWith("sk-")) {
     throw new Error("OPENAI_API_KEY missing or invalid (must start with 'sk-').");
   }
   return `Bearer ${key}`;
@@ -19,7 +20,6 @@ export async function GET() {
   try {
     const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
     const upstreamUrl = `${base}/chat/completions`;
-
     const payload = {
       model: process.env.DEFAULT_MODEL || "gpt-4o-mini",
       messages: [{ role: "user", content: "Hello from /api/ai/debug" }],
