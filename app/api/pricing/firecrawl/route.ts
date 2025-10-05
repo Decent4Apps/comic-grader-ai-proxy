@@ -27,7 +27,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Build search query for eBay sold/completed
     const q = [`"${title}"`];
     if (issue) q.push(`#${issue}`, `issue ${issue}`);
     if (publisher) q.push(publisher);
@@ -38,7 +37,6 @@ export async function POST(req: NextRequest) {
 
     const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
 
-    // Time filter
     const tbsMap: Record<string, string> = {
       week: "qdr:w",
       month: "qdr:m",
@@ -47,9 +45,7 @@ export async function POST(req: NextRequest) {
     };
     const tbs = tbsMap[timeframe || "month"];
 
-    // Firecrawl v2 search
-    const result = await firecrawl.search({
-      query,
+    const result = await firecrawl.search(query, {
       limit: maxResults ?? 12,
       sources: ["web"],
       tbs,
@@ -68,7 +64,6 @@ export async function POST(req: NextRequest) {
       }
     });
 
-    // Basic price extraction (improve later if needed)
     const listings: Array<{
       title: string;
       price: number;
