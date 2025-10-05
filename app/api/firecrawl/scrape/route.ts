@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
       blockAds: scrapeOptions?.blockAds !== false,
       removeBase64Images: scrapeOptions?.removeBase64Images !== false,
       proxy: scrapeOptions?.proxy ?? "auto",
-      storeInCache: scrapeOptions?.storeInCache !== false,
+      storeInCache: scrapeOptions?.storeInCache !== false
     });
 
     return NextResponse.json(result);
