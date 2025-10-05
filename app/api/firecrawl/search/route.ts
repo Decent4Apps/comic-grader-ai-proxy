@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import Firecrawl from "firecrawl-sdk";
+import Firecrawl from "@mendable/firecrawl-js";
 
 export const runtime = "nodejs";
 
