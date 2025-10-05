@@ -1,46 +1,40 @@
 export const runtime = "edge";
 
+function hasV1(url?: string) {
+  if (!url) return false;
+  const clean = url.trim().replace(/\/+$/, "");
+  return /\/v1$/.test(clean);
+}
+
 export async function GET() {
-  const ok = {
+  const env = {
     SUPERAGENT_PROXY_URL: !!process.env.SUPERAGENT_PROXY_URL,
-    SUPERAGENT_AUTH_MODE: (process.env.SUPERAGENT_AUTH_MODE || "openai") as string,
+    SUPERAGENT_PROXY_URL_value: (process.env.SUPERAGENT_PROXY_URL || "").replace(
+      /(firewall\.superagent\.sh\/[^/]+)\/?.*$/i,
+      "$1/…"
+    ),
     OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    SUPERAGENT_PROXY_KEY: !!process.env.SUPERAGENT_PROXY_KEY,
     DEFAULT_MODEL: (process.env.DEFAULT_MODEL || "gpt-4o-mini") as string,
+    urlHasV1Suffix: hasV1(process.env.SUPERAGENT_PROXY_URL),
   };
 
-  const using =
-    ok.SUPERAGENT_AUTH_MODE === "proxy"
-      ? "proxy-key"
-      : "openai-key";
+  const missing = [];
+  if (!env.SUPERAGENT_PROXY_URL) missing.push("SUPERAGENT_PROXY_URL");
+  if (!env.OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
 
-  const missing = Object.entries({
-    SUPERAGENT_PROXY_URL: ok.SUPERAGENT_PROXY_URL,
-    ...(using === "proxy-key"
-      ? { SUPERAGENT_PROXY_KEY: ok.SUPERAGENT_PROXY_KEY }
-      : { OPENAI_API_KEY: ok.OPENAI_API_KEY }),
-  })
-    .filter(([, v]) => !v)
-    .map(([k]) => k);
-
-  const status =
-    !ok.SUPERAGENT_PROXY_URL ||
-    (using === "proxy-key" && !ok.SUPERAGENT_PROXY_KEY) ||
-    (using === "openai-key" && !ok.OPENAI_API_KEY)
-      ? 500
-      : 200;
+  const status = missing.length ? 500 : 200;
 
   return new Response(
     JSON.stringify(
       {
         status,
-        using,
-        ok,
+        ok: status === 200,
+        env,
         missing,
-        hint:
-          using === "proxy-key"
-            ? "Expect Authorization: Bearer <SUPERAGENT_PROXY_KEY>"
-            : "Expect Authorization: Bearer <OPENAI_API_KEY> (OpenAI-compat passthrough)",
+        hints: [
+          "SUPERAGENT_PROXY_URL must end with /v1 exactly once (no double /v1).",
+          "OPENAI_API_KEY must be a valid OpenAI key (starts with sk-).",
+        ],
       },
       null,
       2
