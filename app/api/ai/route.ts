@@ -1,117 +1,118 @@
-export const runtime = "edge";
+// app/api/ai/route.ts
+export const runtime = "nodejs";
 
 /**
- * REQUIRED ENVS (see .env.example):
- * - SUPERAGENT_PROXY_URL: e.g. https://firewall.superagent.sh/<FIREWALL_ID>/v1
+ * REQUIRED ENVS:
+ * - SUPERAGENT_PROXY_URL: e.g. https://firewall.superagent.sh/<FIREWALL_ID> OR .../v1
  * - OPENAI_API_KEY:       e.g. sk-...
- *
  * Optional:
- * - DEFAULT_MODEL: e.g. gpt-4o-mini
+ * - DEFAULT_MODEL:        e.g. gpt-4o-mini
+ *
+ * NOTES:
+ * - We normalize SUPERAGENT_PROXY_URL to end with /v1 exactly once.
+ * - We always send Authorization: Bearer <OPENAI_API_KEY> (OpenAI-compat mode).
+ * - Non-streaming for stability; you can re-enable later.
  */
 
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
 
-// Normalize base to ensure it has exactly one trailing /v1 (no doubles)
 function normalizeFirewallBase(raw?: string): string {
   if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
-  let url = raw.trim();
-  // strip any trailing slashes
-  url = url.replace(/\/+$/, "");
-  // ensure it ends with /v1
-  if (!/\/v1$/.test(url)) url += "/v1";
+  let url = raw.trim().replace(/\/+$/, "");
+  // ensure single /v1 suffix
+  if (!/\/v1$/i.test(url)) url += "/v1";
   return url;
 }
 
-function getUpstreamUrl() {
-  const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
-  return `${base}/chat/completions`;
-}
-
-// Always use OpenAI-compat auth for this handler:
-function getAuthHeader() {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key || !key.startsWith("sk-")) {
+function getAuthHeader(): string {
+  const key = process.env.OPENAI_API_KEY || "";
+  if (!key.startsWith("sk-")) {
     throw new Error("OPENAI_API_KEY missing or invalid (must start with 'sk-').");
   }
   return `Bearer ${key}`;
 }
 
 export async function POST(req: Request) {
-  try {
-    const upstreamUrl = getUpstreamUrl();
+  const started = Date.now();
 
-    // Validate body
+  try {
+    const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
+    const upstreamUrl = `${base}/chat/completions`;
+
     const body = await req.json().catch(() => ({}));
     const { messages, model, temperature, max_tokens, stream } = body || {};
+
     if (!Array.isArray(messages) || messages.length === 0) {
-      return new Response(JSON.stringify({ error: "Invalid 'messages': supply non-empty array." }), {
+      return new Response(JSON.stringify({ error: "Invalid 'messages': provide a non-empty array." }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    // Force non-stream for debug while you stabilize
     const payload = {
       model: model || DEFAULT_MODEL,
       messages,
       temperature: typeof temperature === "number" ? temperature : 0.7,
       max_tokens: typeof max_tokens === "number" ? max_tokens : undefined,
+      // Force non-stream for now; flip to true after 200s are stable
       stream: false,
     };
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+    const timeout = setTimeout(() => controller.abort(), 20000); // 20s
+
+    console.info("[ai-proxy] upstream:", upstreamUrl);
+    console.info("[ai-proxy] model:", payload.model, "stream:", payload.stream);
 
     const res = await fetch(upstreamUrl, {
       method: "POST",
       signal: controller.signal,
       headers: {
-        "Authorization": getAuthHeader(),          // <-- MUST be OPENAI key for OpenAI-compat
+        "Authorization": getAuthHeader(),
         "Content-Type": "application/json",
-        "Accept-Encoding": "identity",             // Avoid RN gzip parse issues while debugging
+        // Avoid RN gzip parse issues while stabilizing
+        "Accept-Encoding": "identity",
       },
       body: JSON.stringify(payload),
-    }).finally(() => clearTimeout(timeoutId));
+    }).finally(() => clearTimeout(timeout));
 
-    const txt = await res.text().catch(() => "");
-    const hdrs: Record<string, string> = {};
-    res.headers.forEach((v, k) => (hdrs[k] = v));
+    const text = await res.text().catch(() => "");
+    const headersDump: Record<string, string> = {};
+    res.headers.forEach((v, k) => (headersDump[k] = v));
 
     if (!res.ok) {
-      // Bubble up ALL the context so you can see exactly what's wrong
+      console.error("[ai-proxy] upstream non-OK:", res.status, text?.slice(0, 400));
       return new Response(
         JSON.stringify(
           {
             error: "Upstream (Superagent) error",
             status: res.status,
+            took_ms: Date.now() - started,
             upstreamUrl,
-            request: {
-              model: payload.model,
-              stream: payload.stream,
-            },
-            responseHeaders: hdrs,
-            body: txt || "No body",
+            request: { model: payload.model, stream: payload.stream },
+            responseHeaders: headersDump,
+            body: text || "No body",
           },
           null,
           2
         ),
-        { status: res.status === 404 ? 502 : 502, headers: { "Content-Type": "application/json" } }
+        { status: 502, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Success: return JSON directly
     let json: any = {};
     try {
-      json = txt ? JSON.parse(txt) : {};
-    } catch {
-      // If Superagent replied with compressed or non-JSON unexpectedly
+      json = text ? JSON.parse(text) : {};
+    } catch (e) {
+      console.error("[ai-proxy] invalid JSON from upstream:", (e as Error)?.message);
       return new Response(
         JSON.stringify(
           {
             error: "Invalid JSON from upstream",
+            took_ms: Date.now() - started,
             upstreamUrl,
-            responseHeaders: hdrs,
-            bodyPreview: txt.slice(0, 400),
+            responseHeaders: headersDump,
+            bodyPreview: text.slice(0, 400),
           },
           null,
           2
@@ -131,13 +132,12 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const msg = err?.message || String(err);
     const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
+    console.error("[ai-proxy] fatal:", msg);
     return new Response(
       JSON.stringify(
         {
           error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
           detail: msg,
-          hint:
-            "Confirm SUPERAGENT_PROXY_URL ends with /v1 (exactly once) and OPENAI_API_KEY is present.",
         },
         null,
         2
