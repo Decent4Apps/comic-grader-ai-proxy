@@ -1,9 +1,17 @@
+// app/api/pricing/firecrawl/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import Firecrawl from "@mendable/firecrawl-js";
 
 export const runtime = "nodejs";
 
 const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
+
+type Doc = {
+  title?: string;
+  url?: string;
+  description?: string;
+  markdown?: string;
+};
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,7 +26,7 @@ export async function POST(req: NextRequest) {
       maxResults,
       timeframe,
       firecrawlOptions
-    } = body;
+    } = body || {};
 
     if (!title) {
       return NextResponse.json(
@@ -27,9 +35,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const q = [`"${title}"`];
+    // Build search query for eBay sold/completed
+    const q: string[] = [`"${title}"`];
     if (issue) q.push(`#${issue}`, `issue ${issue}`);
-    if (publisher) q.push(publisher);
+    if (publisher) q.push(String(publisher));
     if (year) q.push(String(year));
     if (grade) q.push(String(grade));
     q.push("comic book");
@@ -37,6 +46,7 @@ export async function POST(req: NextRequest) {
 
     const query = `site:ebay.com ${q.join(" ")} LH_Sold=1 LH_Complete=1`;
 
+    // Google time filter (TBS)
     const tbsMap: Record<string, string> = {
       week: "qdr:w",
       month: "qdr:m",
@@ -45,17 +55,21 @@ export async function POST(req: NextRequest) {
     };
     const tbs = tbsMap[timeframe || "month"];
 
-    const result = await firecrawl.search(query, {
-      limit: maxResults ?? 12,
+    // Firecrawl v2 search — RETURNS ARRAY OF DOCS
+    const docsUnknown = await firecrawl.search(query, {
+      limit: typeof maxResults === "number" ? maxResults : 12,
       sources: ["web"],
       tbs,
       scrapeOptions: {
-        formats: firecrawlOptions?.formats ?? ["markdown"],
+        formats:
+          Array.isArray(firecrawlOptions?.formats) && firecrawlOptions.formats.length
+            ? firecrawlOptions.formats
+            : ["markdown"],
         onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
         includeTags: firecrawlOptions?.includeTags,
         excludeTags: firecrawlOptions?.excludeTags,
-        maxAge: firecrawlOptions?.maxAge ?? 172800000,
-        waitFor: firecrawlOptions?.waitFor ?? 3000,
+        waitFor:
+          typeof firecrawlOptions?.waitFor === "number" ? firecrawlOptions.waitFor : 3000,
         blockAds: true,
         removeBase64Images: true,
         proxy: "auto",
@@ -63,6 +77,9 @@ export async function POST(req: NextRequest) {
         storeInCache: true
       }
     });
+
+    // Normalize strictly to Doc[]
+    const items: Doc[] = Array.isArray(docsUnknown) ? (docsUnknown as Doc[]) : [];
 
     const listings: Array<{
       title: string;
@@ -72,7 +89,6 @@ export async function POST(req: NextRequest) {
       soldDate: string;
     }> = [];
 
-    const items = result?.data?.web ?? [];
     for (const item of items) {
       const content = `${item.title ?? ""} ${item.description ?? ""} ${item.markdown ?? ""}`;
       const m = content.match(/\$(\d{1,6}(?:\.\d{2})?)/);
