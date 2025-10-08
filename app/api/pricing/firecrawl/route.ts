@@ -6,7 +6,7 @@ import { withCORS, preflight } from "@/app/api/_lib/cors";
 import {
   firecrawlSearch,          // (query: string) => Promise<SearchResult>
   firecrawlScrape,          // (url: string) => Promise<ScrapeResult>
-  parseSaleFromMarkdown,    // (md: string, fallbackTitle: string, opts?: any) => { price?, soldDate?, grade?, condition?, currency? }
+  parseSaleFromMarkdown,    // (md: string, fallbackTitle: string, sourceUrl: string, opts?: any)
   computeStats,             // (nums: number[]) => { min, max, avg, median, currency }
   buildEbaySoldQuery,       // ({ title, issue, grade, site }) => string
   DEFAULT_SCRAPE_CONCURRENCY,
@@ -39,7 +39,6 @@ type ScrapeResultErr = {
 
 type ScrapeResult = ScrapeResultOk | ScrapeResultErr;
 
-// async pool with typing
 async function scrapePool<T, R>(
   items: T[],
   worker: (item: T) => Promise<R>,
@@ -78,10 +77,9 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // Build query: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold -lot -bundle -digital
     const query = buildEbaySoldQuery({ title, issue, grade, site });
 
-    // 1) SEARCH — helper expects a string
+    // 1) SEARCH
     const limit = Math.max(1, Math.min(25, Number(maxResults) || 12));
     const search = await firecrawlSearch(query);
 
@@ -111,16 +109,16 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // 2) SCRAPE — your helper takes (url) only
+    // 2) SCRAPE
     const scraped = await scrapePool<WebItem, ScrapeResult>(
       web,
       async (item: WebItem): Promise<ScrapeResult> => {
         try {
           const s = await firecrawlScrape(item.url);
-
           const markdown = (s as any)?.data?.markdown || item.markdown || "";
-          // FIX: pass 3 args (md, fallbackTitle, opts?)
-          const parsed = parseSaleFromMarkdown(markdown, item.title, undefined);
+
+          // ✅ FIX: 3 required args (md, fallbackTitle, sourceUrl)
+          const parsed = parseSaleFromMarkdown(markdown, item.title, item.url);
 
           return {
             ok: true,
@@ -146,7 +144,12 @@ export const POST = withCORS(async (req) => {
 
     // 3) NORMALIZE + STATS
     const listings = scraped
-      .filter((s): s is ScrapeResultOk => (s as ScrapeResultOk).ok === true && typeof (s as ScrapeResultOk).price === "number" && (s as ScrapeResultOk).price! > 0)
+      .filter(
+        (s): s is ScrapeResultOk =>
+          (s as ScrapeResultOk).ok === true &&
+          typeof (s as ScrapeResultOk).price === "number" &&
+          (s as ScrapeResultOk).price! > 0
+      )
       .map((s) => ({
         title: s.title,
         url: s.url,
@@ -166,15 +169,11 @@ export const POST = withCORS(async (req) => {
           success: true,
           query,
           count: listings.length,
-          stats, // { min, max, avg, median, currency }
+          stats,
           listings,
           failures: scraped
             .filter((s): s is ScrapeResultErr => (s as ScrapeResultErr).ok === false)
-            .map((f) => ({
-              url: f.url,
-              title: f.title,
-              reason: f.reason,
-            })),
+            .map((f) => ({ url: f.url, title: f.title, reason: f.reason })),
           took_ms: Date.now() - started,
         },
         null,
