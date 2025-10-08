@@ -1,260 +1,168 @@
 // app/api/pricing/firecrawl/route.ts
-/* 
-  ComicGraderAI — Firecrawl pricing endpoint
-  - POST body: { title?: string; issue?: string | number; grade?: string; query?: string }
-  - Builds an eBay sold-listings query, calls Firecrawl search, parses prices, returns stats + listings.
-  - Requires: FIRECRAWL_API_KEY
-*/
+import { NextRequest, NextResponse } from 'next/server';
+import Firecrawl from 'firecrawl-sdk';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const maxDuration = 10;
+// Enable 60s timeout and Node.js runtime
+export const maxDuration = 60;
+export const runtime = 'nodejs';
 
-type Listing = {
-  title: string;
-  url: string;
-  source?: string;
-  dateText?: string;
-  priceText?: string;
-  price: number;
-  grade?: string | null;
-};
+// Reuse Firecrawl instance
+let firecrawlInstance: Firecrawl | null = null;
 
-type PriceStats = {
-  count: number;
-  min: number;
-  max: number;
-  mean: number;
-  median: number;
-  p25: number;
-  p75: number;
-  stddev: number;
-};
-
-type FirecrawlSearchItem = {
-  title?: string;
-  url?: string;
-  source?: string;
-  snippet?: string;
-};
-
-type FirecrawlSearchResponse = {
-  data?: FirecrawlSearchItem[];
-};
-
-function badRequest(detail: string, extra?: any) {
-  return new Response(
-    JSON.stringify({ error: "Bad request", detail, ...(extra || {}) }, null, 2),
-    { status: 400, headers: { "content-type": "application/json" } }
-  );
-}
-
-function serverError(detail: string, extra?: any) {
-  return new Response(
-    JSON.stringify({ error: "Server error", detail, ...(extra || {}) }, null, 2),
-    { status: 500, headers: { "content-type": "application/json" } }
-  );
-}
-
-function ok(payload: any, status = 200) {
-  return new Response(JSON.stringify(payload, null, 2), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-/** Build an eBay sold listings query. */
-function buildQuery(params: { title?: string; issue?: string | number; grade?: string; query?: string }) {
-  if (params.query && params.query.trim().length > 0) return params.query.trim();
-
-  const parts: string[] = [];
-  if (params.title) parts.push(params.title);
-  if (params.issue) parts.push(`#${String(params.issue)}`);
-  if (params.grade) parts.push(`CGC ${params.grade}`);
-  // Focus on sold listings (eBay)
-  parts.push(`site:ebay.com "sold"`);
-  return parts.join(" ").trim();
-}
-
-/** Extract a numeric price from arbitrary strings like "$185.50", "USD 199", etc. */
-function extractPrice(text?: string | null): number | null {
-  if (!text) return null;
-  // Remove commas, keep digits and dots
-  const m = text.replace(/,/g, "").match(/(\$|USD)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i);
-  if (!m) return null;
-  const n = Number(m[2]);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Try to infer grade from text (very loose) */
-function extractGrade(text?: string | null): string | null {
-  if (!text) return null;
-  const m = text.match(/\b(?:CGC\s*)?([0-9]\.[0-9])\b/i);
-  return m ? m[1] : null;
-}
-
-/** Quantile helper */
-function quantile(sorted: number[], q: number) {
-  const n = sorted.length;
-  if (n === 0) return 0;
-  if (n === 1) return sorted[0];
-  const pos = (n - 1) * q;
-  const base = Math.floor(pos);
-  const rest = pos - base;
-  if (sorted[base + 1] !== undefined) {
-    return sorted[base] + (sorted[base + 1] - sorted[base]) * rest;
+function getFirecrawl() {
+  if (!firecrawlInstance && process.env.FIRECRAWL_API_KEY) {
+    firecrawlInstance = new Firecrawl({ 
+      apiKey: process.env.FIRECRAWL_API_KEY 
+    });
   }
-  return sorted[base];
+  return firecrawlInstance;
 }
 
-/** Compute stats from an array of prices (numbers). */
-function computeStats(prices: number[]): PriceStats {
-  const arr = (prices ?? []).filter((n) => Number.isFinite(n)) as number[];
-  const count = arr.length;
-  if (count === 0) {
-    return { count: 0, min: 0, max: 0, mean: 0, median: 0, p25: 0, p75: 0, stddev: 0 };
-  }
-
-  const sorted = [...arr].sort((a, b) => a - b);
-  const sum = sorted.reduce((s, n) => s + n, 0);
-  const mean = sum / count;
-
-  const variance =
-    sorted.reduce((acc, n) => acc + Math.pow(n - mean, 2), 0) / (count > 1 ? count - 1 : 1);
-
-  return {
-    count,
-    min: sorted[0],
-    max: sorted[sorted.length - 1],
-    mean,
-    median: quantile(sorted, 0.5),
-    p25: quantile(sorted, 0.25),
-    p75: quantile(sorted, 0.75),
-    stddev: Math.sqrt(variance),
-  };
-}
-
-/** Map Firecrawl result into our Listing shape; price is extracted from title/snippet heuristically. */
-function mapToListing(item: FirecrawlSearchItem): Listing | null {
-  const title = (item.title || "").trim();
-  const url = (item.url || "").trim();
-  const source = (item.source || "").trim();
-  const snippet = (item.snippet || "").trim();
-
-  if (!title || !url) return null;
-
-  const priceFromTitle = extractPrice(title);
-  const priceFromSnippet = extractPrice(snippet);
-  const price = priceFromTitle ?? priceFromSnippet ?? null;
-
-  if (price == null) return null; // skip items with no detectable price
-
-  return {
-    title,
-    url,
-    source,
-    priceText: priceFromTitle != null ? title : snippet || undefined,
-    price,
-    grade: extractGrade(title) ?? extractGrade(snippet),
-  };
-}
-
-/** Call Firecrawl search API */
-async function firecrawlSearch(query: string, signal?: AbortSignal): Promise<Listing[]> {
-  const key = process.env.FIRECRAWL_API_KEY;
-  if (!key) {
-    throw new Error("Missing FIRECRAWL_API_KEY");
-  }
-
-  const res = await fetch("https://api.firecrawl.dev/v0/search", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      query,
-      limit: 25,
-      // You can tune sources; search tends to return web results we can parse
-      // sources: ["web"],
-    }),
-    signal,
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Firecrawl search failed: ${res.status} ${res.statusText} ${text}`);
-  }
-
-  const json = (await res.json()) as FirecrawlSearchResponse;
-  const items = (json.data ?? []).map(mapToListing).filter(Boolean) as Listing[];
-
-  // Deduplicate by URL
-  const seen = new Set<string>();
-  const deduped: Listing[] = [];
-  for (const it of items) {
-    if (!seen.has(it.url)) {
-      seen.add(it.url);
-      deduped.push(it);
-    }
-  }
-  return deduped;
-}
-
-export async function POST(req: Request) {
+export async function POST(request: NextRequest) {
   const started = Date.now();
-
-  let body: any = {};
+  
   try {
-    body = await req.json();
-  } catch {
-    return badRequest("Expected JSON body.");
-  }
+    const body = await request.json();
+    const { title, issue, publisher, year, grade, soldOnly, maxResults, timeframe, firecrawlOptions } = body;
 
-  const { title, issue, grade, query } = body ?? {};
-  const q = buildQuery({ title, issue, grade, query });
-  if (!q) return badRequest("Missing query/title/issue.");
+    const firecrawl = getFirecrawl();
+    if (!firecrawl) {
+      return NextResponse.json(
+        { success: false, listings: [], error: 'Firecrawl API key not configured' },
+        { status: 503 }
+      );
+    }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+    // Build eBay search query
+    const queryParts = [`"${title}"`];
+    if (issue) queryParts.push(`#${issue}`, `issue ${issue}`);
+    if (publisher) queryParts.push(publisher);
+    if (year) queryParts.push(year);
+    if (grade) queryParts.push(grade);
+    queryParts.push('comic book');
+    if (soldOnly) {
+      queryParts.push('sold', '-lot', '-digital');
+    }
+    const query = `site:ebay.com ${queryParts.join(' ')} LH_Sold=1 LH_Complete=1`;
 
-  try {
-    const listings = await firecrawlSearch(q, controller.signal);
+    // Get timeframe filter
+    const tbsMap: Record<string, string> = {
+      'week': 'qdr:w',
+      'month': 'qdr:m',
+      'quarter': 'qdr:m3',
+      'year': 'qdr:y'
+    };
+    const tbs = tbsMap[timeframe || 'month'] || 'qdr:m';
 
-    // Filter obvious junk / outliers (optional)
-    const cleaned = listings.filter((l) => l.price > 0 && l.price < 100000);
+    // FIXED: Increased timeout from 8000ms to 55000ms for Vercel Pro
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 55000);
 
-    // ✅ FIXED: computeStats now accepts number[]
-    const stats = computeStats(cleaned.map((l) => l.price));
+    try {
+      // Call Firecrawl v2
+      const result = await firecrawl.search({
+        query,
+        limit: maxResults || 12,
+        sources: ['web'],
+        tbs,
+        scrapeOptions: {
+          formats: firecrawlOptions?.formats || ['markdown'],
+          onlyMainContent: firecrawlOptions?.onlyMainContent !== false,
+          includeTags: firecrawlOptions?.includeTags,
+          excludeTags: firecrawlOptions?.excludeTags,
+          maxAge: firecrawlOptions?.maxAge || 172800000,
+          waitFor: firecrawlOptions?.waitFor || 3000,
+          blockAds: true,
+          removeBase64Images: true,
+          proxy: 'auto',
+          skipTlsVerification: true,
+          storeInCache: true,
+        }
+      });
 
-    clearTimeout(timeout);
+      clearTimeout(timeout);
 
-    return ok({
-      ok: true,
-      took_ms: Date.now() - started,
-      query: q,
-      counts: {
-        raw: listings.length,
-        cleaned: cleaned.length,
+      console.log('[Pricing] Firecrawl search completed:', {
+        query,
+        results: result.data?.web?.length || 0,
+        took_ms: Date.now() - started
+      });
+
+      // Parse listings from results
+      const listings: any[] = [];
+      if (result.data?.web) {
+        for (const item of result.data.web) {
+          // Extract pricing data from markdown/title/description
+          const content = `${item.title} ${item.description} ${item.markdown || ''}`;
+          const priceMatch = content.match(/\$(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+          
+          if (priceMatch) {
+            const price = parseFloat(priceMatch[1].replace(/,/g, ''));
+            listings.push({
+              title: item.title,
+              price: price,
+              url: item.url,
+              condition: 'Unknown',
+              soldDate: new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      console.log('[Pricing] Found listings:', listings.length);
+
+      return NextResponse.json({
+        success: true,
+        listings,
+        count: listings.length,
+        query,
+        took_ms: Date.now() - started
+      });
+
+    } catch (searchError: any) {
+      clearTimeout(timeout);
+      
+      if (searchError.name === 'AbortError') {
+        console.error('[Pricing] Search timeout after 55s');
+        return NextResponse.json(
+          { 
+            success: false, 
+            listings: [], 
+            error: 'Pricing search timeout',
+            took_ms: Date.now() - started
+          },
+          { status: 504 }
+        );
+      }
+      
+      throw searchError;
+    }
+
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
+    
+    console.error('[Pricing] Error:', msg);
+    
+    return NextResponse.json(
+      { 
+        success: false, 
+        listings: [], 
+        error: isAbort ? 'Pricing search timeout' : msg,
+        took_ms: Date.now() - started
       },
-      stats,
-      listings: cleaned,
-    });
-  } catch (err: any) {
-    clearTimeout(timeout);
-    return serverError(err?.message || String(err), {
-      took_ms: Date.now() - started,
-      query: q,
-    });
+      { status: isAbort ? 504 : 500 }
+    );
   }
 }
 
-export async function GET() {
-  // Lightweight health check for this route
-  return ok({
-    ok: true,
-    route: "/api/pricing/firecrawl",
-    requires: ["FIRECRAWL_API_KEY"],
-    runtime,
+// Health check
+export async function GET(request: NextRequest) {
+  return NextResponse.json({
+    status: 'ok',
+    endpoint: '/api/pricing/firecrawl',
+    configured: !!process.env.FIRECRAWL_API_KEY,
+    maxDuration: 60,
+    timestamp: new Date().toISOString()
   });
 }
