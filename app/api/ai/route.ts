@@ -197,9 +197,10 @@ export async function POST(req: Request) {
     if (stop !== undefined) payload.stop = stop;
     if (user) payload.user = user;
 
-    // Abort BEFORE Vercel's cap so we return a clean JSON instead of runtime kill
+    // Abort BEFORE Vercel's 60s cap so we return a clean JSON instead of runtime kill
+    // FIXED: Increased from 8500ms to 55000ms for Vercel Pro 60s timeout
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8500);
+    const timeout = setTimeout(() => controller.abort(), 55000);
 
     const res = await fetch(upstreamUrl, {
       method: "POST",
@@ -256,6 +257,7 @@ export async function POST(req: Request) {
       {
         error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
         detail: msg,
+        took_ms: Date.now() - started,
       },
       isAbort ? 504 : 500
     );
