@@ -5,7 +5,7 @@ export const maxDuration = 60;
 import { withCORS, preflight } from "@/app/api/_lib/cors";
 import {
   firecrawlSearch,          // (query: string) => Promise<SearchResult>
-  firecrawlScrape,          // (url: string, options?: any) => Promise<ScrapeResult>
+  firecrawlScrape,          // (url: string) => Promise<ScrapeResult>
   parseSaleFromMarkdown,    // (md: string, { fallbackTitle?: string }) => { price?: number, soldDate?: string, grade?: string, condition?: string, currency?: string }
   computeStats,             // (nums: number[]) => { min, max, avg, median, currency }
   buildEbaySoldQuery,       // ({ title, issue, grade, site }) => string
@@ -69,7 +69,6 @@ export const POST = withCORS(async (req) => {
       grade,
       maxResults = 12,
       site = "ebay.com",
-      scrapeOptions,
     } = await req.json();
 
     if (!title || typeof title !== "string") {
@@ -113,21 +112,12 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // 2) SCRAPE — call with (url, options) and strongly type `item`
+    // 2) SCRAPE — call with (url) only; your helper doesn't accept options
     const scraped = await scrapePool<WebItem, ScrapeResult>(
       web,
       async (item: WebItem): Promise<ScrapeResult> => {
         try {
-          const s = await firecrawlScrape(item.url, {
-            formats: ["markdown"],
-            onlyMainContent: true,
-            maxAge: (scrapeOptions?.maxAge as number | undefined) ?? 172800000, // 48h cache
-            blockAds: true,
-            removeBase64Images: true,
-            proxy: "auto",
-            skipTlsVerification: true,
-            storeInCache: true,
-          });
+          const s = await firecrawlScrape(item.url); // <-- single-arg call
 
           const markdown = (s as any)?.data?.markdown || item.markdown || "";
           const parsed = parseSaleFromMarkdown(markdown, { fallbackTitle: item.title });
