@@ -34,6 +34,7 @@ export const OPTIONS = preflight;
 
 export const POST = withCORS(async (req) => {
   const started = Date.now();
+
   try {
     const {
       title,
@@ -51,18 +52,16 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // Build an eBay solds query like: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold
+    // Build an eBay solds query like: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold -lot -bundle -digital
     const query = buildEbaySoldQuery({ title, issue, grade, site });
 
-    // 1) Search
-    const search = await firecrawlSearch({
-      query,
-      limit: Math.max(1, Math.min(25, Number(maxResults) || 12)),
-      sources: ["web"],
-      tbs: undefined,
-    });
+    // 1) Search (NOTE: firecrawlSearch expects a string)
+    const limit = Math.max(1, Math.min(25, Number(maxResults) || 12));
+    const search = await firecrawlSearch(query);
 
-    const web = (search?.data?.web ?? []).map((w: any) => ({
+    // Keep up to `limit` results and normalize
+    const rawWeb = (search as any)?.data?.web ?? [];
+    const web = rawWeb.slice(0, limit).map((w: any) => ({
       title: w?.title || "",
       url: w?.url || "",
       description: w?.description || "",
