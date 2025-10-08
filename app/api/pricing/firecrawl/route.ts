@@ -1,6 +1,6 @@
-// app/api/ai/route.ts
+// app/api/pricing/firecrawl/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 10; // be explicit on Node func max runtime
+export const maxDuration = 60; // Firecrawl + parsing can be slow on cold
 
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
 
