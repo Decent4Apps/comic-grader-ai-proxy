@@ -1,6 +1,7 @@
 // app/api/ai/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 10; // can't exceed platform cap
+export const maxDuration = 60; // use Pro ceiling for cold + upstream latency
+
 
 /**
  * ENV
