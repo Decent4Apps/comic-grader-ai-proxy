@@ -1,138 +1,164 @@
 // app/api/pricing/firecrawl/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 60; // Firecrawl + parsing can be slow on cold
+export const maxDuration = 60;
 
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "gpt-4o-mini";
+import { withCORS, preflight } from "@/app/api/_lib/cors";
+import {
+  firecrawlSearch,
+  firecrawlScrape,
+  parseSaleFromMarkdown,
+  computeStats,
+  buildEbaySoldQuery,
+  DEFAULT_SCRAPE_CONCURRENCY,
+} from "@/src/lib/firecrawl";
 
-function normalizeFirewallBase(raw?: string): string {
-  if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
-  let url = raw.trim().replace(/\/+$/, "");
-  if (!/\/v1$/i.test(url)) url += "/v1";
-  return url;
-}
-
-function getAuthHeader(): string {
-  const key = process.env.OPENAI_API_KEY || "";
-  if (!key.startsWith("sk-")) {
-    throw new Error("OPENAI_API_KEY missing or invalid (must start with 'sk-').");
+// Lightweight concurrency pool (same pattern as /api/firecrawl/search)
+async function scrapePool<T, R>(
+  items: T[],
+  worker: (item: T) => Promise<R>,
+  limit = DEFAULT_SCRAPE_CONCURRENCY
+): Promise<R[]> {
+  const results: R[] = [];
+  let i = 0;
+  async function next(): Promise<void> {
+    const index = i++;
+    if (index >= items.length) return;
+    results[index] = await worker(items[index]);
+    return next();
   }
-  return `Bearer ${key}`;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
+  return results;
 }
 
-export async function POST(req: Request) {
+export const OPTIONS = preflight;
+
+export const POST = withCORS(async (req) => {
   const started = Date.now();
-
   try {
-    const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
-    const upstreamUrl = `${base}/chat/completions`;
+    const {
+      title,
+      issue,
+      grade,
+      maxResults = 12,
+      site = "ebay.com",
+      scrapeOptions,
+    } = await req.json();
 
-    const body = await req.json().catch(() => ({}));
-    const { messages, model, temperature, max_tokens } = body || {};
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return new Response(JSON.stringify({ error: "Invalid 'messages': provide a non-empty array." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    const payload = {
-      model: model || DEFAULT_MODEL,
-      messages,
-      temperature: typeof temperature === "number" ? temperature : 0.7,
-      max_tokens: typeof max_tokens === "number" ? max_tokens : undefined,
-      stream: false,
-    };
-
-    // Abort before Vercel's 10s hard limit
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8500);
-
-    const res = await fetch(upstreamUrl, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: getAuthHeader(),
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-      },
-      body: JSON.stringify(payload),
-    }).finally(() => clearTimeout(timeout));
-
-    const text = await res.text().catch(() => "");
-    if (!res.ok) {
+    if (!title || typeof title !== "string") {
       return new Response(
-        JSON.stringify(
-          {
-            error: "Upstream (Superagent) error",
-            status: res.status,
-            took_ms: Date.now() - started,
-            upstreamUrl,
-            request: { model: payload.model, stream: payload.stream },
-            body: text || "No body",
-          },
-          null,
-          2
-        ),
-        { status: 502, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ success: false, error: "Missing or invalid 'title'." }, null, 2),
+        { status: 400, headers: { "content-type": "application/json" } }
       );
     }
 
-    let json: any = {};
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {
-      return new Response(
-        JSON.stringify(
-          {
-            error: "Invalid JSON from upstream",
-            took_ms: Date.now() - started,
-            upstreamUrl,
-            bodyPreview: text.slice(0, 400),
-          },
-          null,
-          2
-        ),
-        { status: 502, headers: { "Content-Type": "application/json" } }
-      );
-    }
+    // Build an eBay solds query like: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold
+    const query = buildEbaySoldQuery({ title, issue, grade, site });
 
-    return new Response(JSON.stringify(json), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Encoding": "identity",
-        "Cache-Control": "no-store",
-      },
+    // 1) Search
+    const search = await firecrawlSearch({
+      query,
+      limit: Math.max(1, Math.min(25, Number(maxResults) || 12)),
+      sources: ["web"],
+      tbs: undefined,
     });
-  } catch (err: any) {
-    const msg = err?.message || String(err);
-    const isAbort = /abort/i.test(msg) || /The operation was aborted/i.test(msg);
+
+    const web = (search?.data?.web ?? []).map((w: any) => ({
+      title: w?.title || "",
+      url: w?.url || "",
+      description: w?.description || "",
+      markdown: w?.markdown || "",
+    }));
+
+    if (!web.length) {
+      return new Response(
+        JSON.stringify(
+          {
+            success: true,
+            query,
+            count: 0,
+            stats: { min: null, max: null, avg: null, median: null, currency: "USD" },
+            listings: [],
+            took_ms: Date.now() - started,
+          },
+          null,
+          2
+        ),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    // 2) Scrape each result for main content markdown
+    const scraped = await scrapePool(
+      web,
+      async (item: any) => {
+        try {
+          const s = await firecrawlScrape({
+            url: item.url,
+            options: {
+              formats: ["markdown"],
+              onlyMainContent: true,
+              maxAge: scrapeOptions?.maxAge ?? 172800000, // 48h cache
+              blockAds: true,
+              removeBase64Images: true,
+              proxy: "auto",
+              skipTlsVerification: true,
+              storeInCache: true,
+            },
+          });
+          const markdown = s?.data?.markdown || item.markdown || "";
+          const parsed = parseSaleFromMarkdown(markdown, { fallbackTitle: item.title });
+          return { ok: true, url: item.url, title: item.title, ...parsed };
+        } catch (e: any) {
+          return { ok: false, url: item.url, title: item.title, reason: e?.message || String(e) };
+        }
+      },
+      DEFAULT_SCRAPE_CONCURRENCY
+    );
+
+    // 3) Normalize listings & compute stats
+    const listings = scraped
+      .filter((s: any) => s.ok && typeof s.price === "number" && s.price > 0)
+      .map((s: any) => ({
+        title: s.title,
+        url: s.url,
+        price: s.price,
+        currency: s.currency ?? "USD",
+        soldDate: s.soldDate ?? null,
+        condition: s.condition ?? null,
+        grade: s.grade ?? null,
+        source: "ebay",
+      }));
+
+    const stats = computeStats(listings.map((l: any) => l.price));
+
     return new Response(
       JSON.stringify(
         {
-          error: isAbort ? "Gateway timeout to Superagent" : "AI proxy error",
-          detail: msg,
+          success: true,
+          query,
+          count: listings.length,
+          stats, // { min, max, avg, median, currency }
+          listings,
+          failures: scraped.filter((s: any) => !s.ok).map((f: any) => ({
+            url: f.url,
+            title: f.title,
+            reason: f.reason,
+          })),
+          took_ms: Date.now() - started,
         },
         null,
         2
       ),
-      { status: isAbort ? 504 : 500, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify(
+        { success: false, error: "FIRECRAWL_PRICING_FAILED", detail: String(err?.message || err) },
+        null,
+        2
+      ),
+      { status: 502, headers: { "content-type": "application/json" } }
     );
   }
-}
-
-export async function GET() {
-  return new Response(
-    JSON.stringify(
-      {
-        status: "ok",
-        modelDefault: DEFAULT_MODEL,
-        ts: new Date().toISOString(),
-      },
-      null,
-      2
-    ),
-    { status: 200, headers: { "Content-Type": "application/json" } }
-  );
-}
+});
