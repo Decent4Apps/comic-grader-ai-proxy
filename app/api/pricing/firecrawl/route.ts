@@ -6,7 +6,7 @@ import { withCORS, preflight } from "@/app/api/_lib/cors";
 import {
   firecrawlSearch,          // (query: string) => Promise<SearchResult>
   firecrawlScrape,          // (url: string) => Promise<ScrapeResult>
-  parseSaleFromMarkdown,    // (md: string, fallbackTitle: string, sourceUrl: string, opts?: any)
+  parseSaleFromMarkdown,    // (md: string, fallbackTitle: string, sourceUrl: string, opts?: any) => ParsedSale
   computeStats,             // (nums: number[]) => { min, max, avg, median, currency }
   buildEbaySoldQuery,       // ({ title, issue, grade, site }) => string
   DEFAULT_SCRAPE_CONCURRENCY,
@@ -25,9 +25,9 @@ type ScrapeResultOk = {
   title: string;
   price?: number;
   currency?: string;
-  soldDate?: string;
-  grade?: string;
-  condition?: string;
+  soldDate?: string | null;
+  grade?: string | null;
+  condition?: string | null;
 };
 
 type ScrapeResultErr = {
@@ -39,6 +39,7 @@ type ScrapeResultErr = {
 
 type ScrapeResult = ScrapeResultOk | ScrapeResultErr;
 
+// simple async pool with typing
 async function scrapePool<T, R>(
   items: T[],
   worker: (item: T) => Promise<R>,
@@ -77,12 +78,14 @@ export const POST = withCORS(async (req) => {
       );
     }
 
+    // Build query: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold -lot -bundle -digital
     const query = buildEbaySoldQuery({ title, issue, grade, site });
 
-    // 1) SEARCH
+    // 1) SEARCH — helper expects a string
     const limit = Math.max(1, Math.min(25, Number(maxResults) || 12));
     const search = await firecrawlSearch(query);
 
+    // take up to `limit`
     const rawWeb = (search as any)?.data?.web ?? [];
     const web: WebItem[] = rawWeb.slice(0, limit).map((w: any) => ({
       title: w?.title || "",
@@ -109,7 +112,7 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // 2) SCRAPE
+    // 2) SCRAPE — your helper takes (url) only
     const scraped = await scrapePool<WebItem, ScrapeResult>(
       web,
       async (item: WebItem): Promise<ScrapeResult> => {
@@ -117,8 +120,9 @@ export const POST = withCORS(async (req) => {
           const s = await firecrawlScrape(item.url);
           const markdown = (s as any)?.data?.markdown || item.markdown || "";
 
-          // ✅ FIX: 3 required args (md, fallbackTitle, sourceUrl)
+          // ParsedSale type in your lib doesn't declare soldDate/grade/condition; read them via `any`
           const parsed = parseSaleFromMarkdown(markdown, item.title, item.url);
+          const anyParsed = parsed as any;
 
           return {
             ok: true,
@@ -126,9 +130,9 @@ export const POST = withCORS(async (req) => {
             title: item.title,
             price: parsed.price,
             currency: parsed.currency,
-            soldDate: parsed.soldDate,
-            grade: parsed.grade,
-            condition: parsed.condition,
+            soldDate: anyParsed?.soldDate ?? null,
+            grade: anyParsed?.grade ?? null,
+            condition: anyParsed?.condition ?? null,
           };
         } catch (e: any) {
           return {
@@ -169,7 +173,7 @@ export const POST = withCORS(async (req) => {
           success: true,
           query,
           count: listings.length,
-          stats,
+          stats, // { min, max, avg, median, currency }
           listings,
           failures: scraped
             .filter((s): s is ScrapeResultErr => (s as ScrapeResultErr).ok === false)
