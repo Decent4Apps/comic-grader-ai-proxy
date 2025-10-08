@@ -23,7 +23,8 @@
     "@anthropic-ai/sdk": "^0.27.3",
     "superagent-ai": "^0.0.5",
     "zod": "^3.23.8",
-    "@mendable/firecrawl-js": "^1.4.3"
+    "@mendable/firecrawl-js": "^1.4.3",
+    "firecrawl-sdk": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
