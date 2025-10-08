@@ -6,7 +6,7 @@ import { withCORS, preflight } from "@/app/api/_lib/cors";
 import {
   firecrawlSearch,          // (query: string) => Promise<SearchResult>
   firecrawlScrape,          // (url: string) => Promise<ScrapeResult>
-  parseSaleFromMarkdown,    // (md: string, { fallbackTitle?: string }) => { price?: number, soldDate?: string, grade?: string, condition?: string, currency?: string }
+  parseSaleFromMarkdown,    // (md: string, fallbackTitle: string, opts?: any) => { price?, soldDate?, grade?, condition?, currency? }
   computeStats,             // (nums: number[]) => { min, max, avg, median, currency }
   buildEbaySoldQuery,       // ({ title, issue, grade, site }) => string
   DEFAULT_SCRAPE_CONCURRENCY,
@@ -39,7 +39,7 @@ type ScrapeResultErr = {
 
 type ScrapeResult = ScrapeResultOk | ScrapeResultErr;
 
-// simple async pool with typing
+// async pool with typing
 async function scrapePool<T, R>(
   items: T[],
   worker: (item: T) => Promise<R>,
@@ -85,7 +85,6 @@ export const POST = withCORS(async (req) => {
     const limit = Math.max(1, Math.min(25, Number(maxResults) || 12));
     const search = await firecrawlSearch(query);
 
-    // take up to `limit`
     const rawWeb = (search as any)?.data?.web ?? [];
     const web: WebItem[] = rawWeb.slice(0, limit).map((w: any) => ({
       title: w?.title || "",
@@ -112,15 +111,16 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // 2) SCRAPE — call with (url) only; your helper doesn't accept options
+    // 2) SCRAPE — your helper takes (url) only
     const scraped = await scrapePool<WebItem, ScrapeResult>(
       web,
       async (item: WebItem): Promise<ScrapeResult> => {
         try {
-          const s = await firecrawlScrape(item.url); // <-- single-arg call
+          const s = await firecrawlScrape(item.url);
 
           const markdown = (s as any)?.data?.markdown || item.markdown || "";
-          const parsed = parseSaleFromMarkdown(markdown, { fallbackTitle: item.title });
+          // FIX: pass 3 args (md, fallbackTitle, opts?)
+          const parsed = parseSaleFromMarkdown(markdown, item.title, undefined);
 
           return {
             ok: true,
