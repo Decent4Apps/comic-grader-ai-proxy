@@ -12,7 +12,34 @@ import {
   DEFAULT_SCRAPE_CONCURRENCY,
 } from "@/src/lib/firecrawl";
 
-// simple async pool
+type WebItem = {
+  title: string;
+  url: string;
+  description: string;
+  markdown: string;
+};
+
+type ScrapeResultOk = {
+  ok: true;
+  url: string;
+  title: string;
+  price?: number;
+  currency?: string;
+  soldDate?: string;
+  grade?: string;
+  condition?: string;
+};
+
+type ScrapeResultErr = {
+  ok: false;
+  url: string;
+  title: string;
+  reason: string;
+};
+
+type ScrapeResult = ScrapeResultOk | ScrapeResultErr;
+
+// simple async pool with typing
 async function scrapePool<T, R>(
   items: T[],
   worker: (item: T) => Promise<R>,
@@ -55,13 +82,13 @@ export const POST = withCORS(async (req) => {
     // Build query: site:ebay.com "Spider-Man" "#1" "CGC 9.2" sold -lot -bundle -digital
     const query = buildEbaySoldQuery({ title, issue, grade, site });
 
-    // 1) SEARCH — your helper expects a string
+    // 1) SEARCH — helper expects a string
     const limit = Math.max(1, Math.min(25, Number(maxResults) || 12));
     const search = await firecrawlSearch(query);
 
     // take up to `limit`
     const rawWeb = (search as any)?.data?.web ?? [];
-    const web = rawWeb.slice(0, limit).map((w: any) => ({
+    const web: WebItem[] = rawWeb.slice(0, limit).map((w: any) => ({
       title: w?.title || "",
       url: w?.url || "",
       description: w?.description || "",
@@ -86,15 +113,15 @@ export const POST = withCORS(async (req) => {
       );
     }
 
-    // 2) SCRAPE — call with (url, options) instead of a single object
-    const scraped = await scrapePool(
+    // 2) SCRAPE — call with (url, options) and strongly type `item`
+    const scraped = await scrapePool<WebItem, ScrapeResult>(
       web,
-      async (item) => {
+      async (item: WebItem): Promise<ScrapeResult> => {
         try {
           const s = await firecrawlScrape(item.url, {
             formats: ["markdown"],
             onlyMainContent: true,
-            maxAge: scrapeOptions?.maxAge ?? 172800000, // 48h cache
+            maxAge: (scrapeOptions?.maxAge as number | undefined) ?? 172800000, // 48h cache
             blockAds: true,
             removeBase64Images: true,
             proxy: "auto",
@@ -104,9 +131,24 @@ export const POST = withCORS(async (req) => {
 
           const markdown = (s as any)?.data?.markdown || item.markdown || "";
           const parsed = parseSaleFromMarkdown(markdown, { fallbackTitle: item.title });
-          return { ok: true, url: item.url, title: item.title, ...parsed };
+
+          return {
+            ok: true,
+            url: item.url,
+            title: item.title,
+            price: parsed.price,
+            currency: parsed.currency,
+            soldDate: parsed.soldDate,
+            grade: parsed.grade,
+            condition: parsed.condition,
+          };
         } catch (e: any) {
-          return { ok: false, url: item.url, title: item.title, reason: e?.message || String(e) };
+          return {
+            ok: false,
+            url: item.url,
+            title: item.title,
+            reason: e?.message || String(e),
+          };
         }
       },
       DEFAULT_SCRAPE_CONCURRENCY
@@ -114,11 +156,11 @@ export const POST = withCORS(async (req) => {
 
     // 3) NORMALIZE + STATS
     const listings = scraped
-      .filter((s: any) => s.ok && typeof s.price === "number" && s.price > 0)
-      .map((s: any) => ({
+      .filter((s): s is ScrapeResultOk => (s as ScrapeResultOk).ok === true && typeof (s as ScrapeResultOk).price === "number" && (s as ScrapeResultOk).price! > 0)
+      .map((s) => ({
         title: s.title,
         url: s.url,
-        price: s.price,
+        price: s.price!,
         currency: s.currency ?? "USD",
         soldDate: s.soldDate ?? null,
         condition: s.condition ?? null,
@@ -126,7 +168,7 @@ export const POST = withCORS(async (req) => {
         source: "ebay",
       }));
 
-    const stats = computeStats(listings.map((l: any) => l.price));
+    const stats = computeStats(listings.map((l) => l.price));
 
     return new Response(
       JSON.stringify(
@@ -136,11 +178,13 @@ export const POST = withCORS(async (req) => {
           count: listings.length,
           stats, // { min, max, avg, median, currency }
           listings,
-          failures: scraped.filter((s: any) => !s.ok).map((f: any) => ({
-            url: f.url,
-            title: f.title,
-            reason: f.reason,
-          })),
+          failures: scraped
+            .filter((s): s is ScrapeResultErr => (s as ScrapeResultErr).ok === false)
+            .map((f) => ({
+              url: f.url,
+              title: f.title,
+              reason: f.reason,
+            })),
           took_ms: Date.now() - started,
         },
         null,
