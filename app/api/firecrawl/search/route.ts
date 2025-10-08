@@ -1,6 +1,7 @@
 // app/api/firecrawl/search/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60; // enable cold-start headroom
+
 
 import { NextRequest } from "next/server";
 import {
