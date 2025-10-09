@@ -1,6 +1,5 @@
 // src/lib/firecrawl.ts
-// Firecrawl v2 API - Using 'firecrawl' npm package v4.3.8
-// Based on: https://docs.firecrawl.dev/introduction
+// Improved version with better eBay sold listing filtering
 
 import Firecrawl from 'firecrawl';
 
@@ -29,7 +28,7 @@ export async function searchWithScrape(query: string, limit: number = 6) {
   try {
     // v2 API: search() with scrapeOptions returns URLs + markdown in ONE call!
     const result = await client.search(query, {
-      limit,
+      limit: limit + 4, // Request extra to account for filtering
       scrapeOptions: {
         formats: ['markdown'],
         onlyMainContent: true,
@@ -43,15 +42,37 @@ export async function searchWithScrape(query: string, limit: number = 6) {
       count: result.web?.length || 0
     });
 
-    // v2 Response structure: { web: [...], news: [...], images: [...] }
-    // Each web item has: { url, title, description, markdown }
     if (!result.web || result.web.length === 0) {
       console.warn('[Firecrawl v2] No web results returned');
       return [];
     }
 
-    // Return results with markdown included
-    const results = result.web.map((item: any) => {
+    // Filter out eBay category pages and non-item pages
+    const filteredResults = result.web.filter((item: any) => {
+      const url = item.url || '';
+      
+      // Only keep URLs that look like actual eBay item pages
+      const isEbayItem = url.includes('/itm/') || url.includes('ebay.com/itm');
+      const isCategoryPage = url.includes('/b/') || url.includes('/bn_');
+      const isSearchPage = url.includes('/sch/') || url.includes('_nkw=');
+      
+      if (isCategoryPage || isSearchPage) {
+        console.log('[Firecrawl v2] Filtering out non-item page:', url);
+        return false;
+      }
+      
+      if (!isEbayItem && url.includes('ebay.com')) {
+        console.log('[Firecrawl v2] Filtering out non-item eBay page:', url);
+        return false;
+      }
+      
+      return true;
+    });
+
+    console.log('[Firecrawl v2] Filtered from', result.web.length, 'to', filteredResults.length, 'actual listings');
+
+    // Return results with markdown included, limited to requested amount
+    const results = filteredResults.slice(0, limit).map((item: any) => {
       console.log('[Firecrawl v2] Item:', {
         url: item.url,
         title: item.title,
@@ -67,7 +88,7 @@ export async function searchWithScrape(query: string, limit: number = 6) {
       };
     });
 
-    console.log('[Firecrawl v2] Returning', results.length, 'results');
+    console.log('[Firecrawl v2] Returning', results.length, 'filtered results');
     return results;
 
   } catch (error: any) {
@@ -184,12 +205,21 @@ export function buildEbaySoldQuery(input: {
 }) {
   const site = (input.site || "ebay.com").replace(/^site:/i, "");
   const parts: string[] = [];
-  if (input.title) parts.push(`"${input.title}"`);
-  if (input.issue) parts.push(`"#${String(input.issue)}"`);
+  
+  if (input.title) {
+    parts.push(`"${input.title}"`);
+  }
+  if (input.issue) {
+    parts.push(`"#${String(input.issue)}"`);
+  }
   if (input.grade !== undefined && input.grade !== null && input.grade !== "") {
     parts.push(`"CGC ${String(input.grade).trim()}"`);
   }
+  
+  // Add "sold" and specify we want item pages only
   parts.push("sold");
+  parts.push("inurl:itm"); // Only get actual eBay item pages!
+  
   return `site:${site} ${parts.join(" ")}`.trim();
 }
 
