@@ -32,20 +32,13 @@ export async function firecrawlSearchWithScrape(
   }
 
   try {
-    const result = await client.search({
-      query,
+    const result = await client.search(query, {
       limit,
-      sources: ['web'],
       scrapeOptions: {
         formats: ['markdown'],
         onlyMainContent: true,
         excludeTags: ['nav', 'footer', 'header', 'ads'],
-        maxAge: 172800000, // 2 days cache
         waitFor: 3000,
-        blockAds: true,
-        removeBase64Images: true,
-        storeInCache: true,
-        skipTlsVerification: true,
       }
     });
 
