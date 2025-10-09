@@ -1,83 +1,83 @@
 // src/lib/firecrawl.ts
-// Lightweight Firecrawl client + eBay sold-page parsing + stats helpers.
+// Firecrawl v2 API - Using 'firecrawl' npm package v4.3.8
+// Based on: https://docs.firecrawl.dev/introduction
 
-export const FIRECRAWL_BASE_URL =
-  process.env.FIRECRAWL_BASE_URL?.replace(/\/+$/, "") || "https://api.firecrawl.dev";
+import Firecrawl from 'firecrawl';
 
 const API_KEY = process.env.FIRECRAWL_API_KEY || "";
-const DEFAULT_SEARCH_LIMIT = Number(process.env.FIRECRAWL_SEARCH_LIMIT || 6);
-export const DEFAULT_SCRAPE_CONCURRENCY = Number(process.env.FIRECRAWL_SCRAPE_CONCURRENCY || 3);
 
-// --- gzip-safe fetch with timeout ---
-export async function fFetch<T = any>(
-  path: string,
-  options: RequestInit & { signal?: AbortSignal } = {}
-): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 50_000); // 50s (increased for Vercel Pro)
+// Initialize Firecrawl client (singleton for performance)
+let firecrawlClient: Firecrawl | null = null;
+
+function getFirecrawl() {
+  if (!firecrawlClient && API_KEY) {
+    firecrawlClient = new Firecrawl({ apiKey: API_KEY });
+  }
+  return firecrawlClient;
+}
+
+// --- Main Search with Scraping (v2 - ONE call gets everything!) ---
+
+export async function searchWithScrape(query: string, limit: number = 6) {
+  const client = getFirecrawl();
+  if (!client) {
+    throw new Error('Firecrawl API key not configured');
+  }
+
+  console.log('[Firecrawl v2] Searching with scraping:', { query, limit });
 
   try {
-    const res = await fetch(`${FIRECRAWL_BASE_URL}${path}`, {
-      ...options,
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${API_KEY}`,
-        "accept-encoding": "gzip, deflate, br",
-        ...(options.headers || {}),
-      },
-      signal: options.signal ?? controller.signal,
-      // Next/Node fetch handles gzip/deflate automatically on server
+    // v2 API: search() with scrapeOptions returns URLs + markdown in ONE call!
+    const result = await client.search(query, {
+      limit,
+      scrapeOptions: {
+        formats: ['markdown'],
+        onlyMainContent: true,
+        excludeTags: ['nav', 'footer', 'header', 'ads'],
+        waitFor: 3000,
+      }
     });
 
-    const text = await res.text();
-    const data = (() => {
-      try { return JSON.parse(text); } catch { return text as any; }
-    })();
+    console.log('[Firecrawl v2] Response received:', {
+      hasWeb: !!result.web,
+      count: result.web?.length || 0
+    });
 
-    if (!res.ok) {
-      throw new Error(
-        `Firecrawl ${res.status}: ${typeof data === "string" ? data : JSON.stringify(data)}`
-      );
+    // v2 Response structure: { web: [...], news: [...], images: [...] }
+    // Each web item has: { url, title, description, markdown }
+    if (!result.web || result.web.length === 0) {
+      console.warn('[Firecrawl v2] No web results returned');
+      return [];
     }
 
-    return data as T;
-  } finally {
-    clearTimeout(timeout);
+    // Return results with markdown included
+    const results = result.web.map((item: any) => {
+      console.log('[Firecrawl v2] Item:', {
+        url: item.url,
+        title: item.title,
+        hasMarkdown: !!item.markdown,
+        markdownLength: item.markdown?.length || 0
+      });
+
+      return {
+        url: item.url,
+        title: item.title,
+        description: item.description,
+        markdown: item.markdown || ''
+      };
+    });
+
+    console.log('[Firecrawl v2] Returning', results.length, 'results');
+    return results;
+
+  } catch (error: any) {
+    console.error('[Firecrawl v2] Search error:', error.message);
+    throw error;
   }
 }
 
-// --- Public helpers ---
-
-export type SearchResult = {
-  url: string;
-  title?: string;
-  snippet?: string;
-};
-
-export async function firecrawlSearch(query: string, limit = DEFAULT_SEARCH_LIMIT) {
-  type SearchResp = { data?: Array<{ url: string; title?: string; snippet?: string }> };
-  const body = JSON.stringify({ query, limit });
-  const res = await fFetch<SearchResp>("/v1/search", { method: "POST", body });
-  const results = (res?.data || []).map((r) => ({
-    url: r.url,
-    title: r.title,
-    snippet: r.snippet,
-  })) as SearchResult[];
-  return results;
-}
-
-export async function firecrawlScrape(url: string) {
-  type ScrapeResp = {
-    url: string;
-    markdown?: string;
-    html?: string;
-    error?: string;
-  };
-  const body = JSON.stringify({ url, formats: ["markdown"] });
-  return await fFetch<ScrapeResp>("/v1/scrape", { method: "POST", body });
-}
-
 // --- Parsing eBay sold pages ---
+
 export type ParsedSale = {
   url: string;
   title?: string;
@@ -87,75 +87,67 @@ export type ParsedSale = {
   dateText?: string;
 };
 
-const PRICE_RE = /\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/g; // $1,234.56 or 1234.56
-const USD_CURRENCY_HINT = /\$|USD|US\s*\$/i;
+// Price patterns - look for sold prices specifically
+const SOLD_PRICE_PATTERNS = [
+  /sold.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+  /price.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+  /\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)\s*(?:USD|sold|sale)/i,
+];
+
 const GRADE_RE = /\bCGC\s*([0-9]\.[0-9]|10(?:\.0)?)\b/i;
-// Loose date patterns from eBay sold/ended sections
-const DATE_RE =
-  /\b(Sold|Ended|Completed|Date|On)\s*(on|:)?\s*([A-Za-z]{3,}\s*\d{1,2},?\s*\d{2,4}|\d{1,2}[\/\-][A-Za-z]{3}[\/\-]\d{2,4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i;
+const DATE_RE = /\b(Sold|Ended|Completed|Date|On)\s*(on|:)?\s*([A-Za-z]{3,}\s*\d{1,2},?\s*\d{2,4}|\d{1,2}[\/\-][A-Za-z]{3}[\/\-]\d{2,4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i;
 
 export function parseSaleFromMarkdown(
   url: string,
   title: string | undefined,
-  md: string,
-  fallbackCurrency = "USD"
+  md: string
 ): ParsedSale {
   let price: number | undefined;
-  let currency: string | undefined;
   let gradeDetected: string | undefined;
   let dateText: string | undefined;
 
-  const lines = md.split(/\r?\n/);
-
-  // Look for sold price specifically (more accurate)
-  const soldPricePatterns = [
-    /sold.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
-    /price.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
-  ];
-
-  for (const line of lines) {
-    if (!price) {
-      // Try sold-specific patterns first
-      for (const pattern of soldPricePatterns) {
-        const soldMatch = pattern.exec(line);
-        if (soldMatch) {
-          const val = Number(soldMatch[1].replace(/,/g, ""));
-          if (!Number.isNaN(val) && val > 10 && val < 50000) { // Filter obvious outliers
-            price = val;
-            currency = "USD";
-            break;
-          }
-        }
-      }
-      
-      // Fall back to general price pattern
-      if (!price) {
-        PRICE_RE.lastIndex = 0;
-        const m = PRICE_RE.exec(line);
-        if (m) {
-          const val = Number(m[1].replace(/,/g, ""));
-          // Filter outliers: reasonable range for comics ($10-$50k)
-          if (!Number.isNaN(val) && val > 10 && val < 50000) {
-            price = val;
-            currency = USD_CURRENCY_HINT.test(line) ? "USD" : undefined;
-          }
-        }
-      }
-    }
-    if (!gradeDetected) {
-      const gm = GRADE_RE.exec(line);
-      if (gm) gradeDetected = `CGC ${gm[1]}`;
-    }
-    if (!dateText) {
-      const dm = DATE_RE.exec(line);
-      if (dm) dateText = dm[0];
-    }
-    if (price && gradeDetected && dateText) break;
+  if (!md || md.length === 0) {
+    console.log('[Parse] No markdown content for:', url);
+    return { url, title, price: undefined, currency: 'USD' };
   }
 
-  if (!currency) currency = fallbackCurrency;
+  console.log('[Parse] Processing markdown length:', md.length);
 
-  return { url, title, price, currency, gradeDetected, dateText };
+  // Try sold-specific price patterns first
+  for (const pattern of SOLD_PRICE_PATTERNS) {
+    const match = pattern.exec(md);
+    if (match) {
+      const val = Number(match[1].replace(/,/g, ""));
+      if (!Number.isNaN(val) && val > 10 && val < 50000) {
+        price = val;
+        console.log('[Parse] Found price:', price);
+        break;
+      }
+    }
+  }
+
+  // Extract grade
+  const gradeMatch = GRADE_RE.exec(md);
+  if (gradeMatch) {
+    gradeDetected = `CGC ${gradeMatch[1]}`;
+  }
+
+  // Extract date
+  const dateMatch = DATE_RE.exec(md);
+  if (dateMatch) {
+    dateText = dateMatch[0];
+  }
+
+  console.log('[Parse] Extracted from', url, ':', { price, gradeDetected, dateText });
+
+  return {
+    url,
+    title,
+    price,
+    currency: price ? 'USD' : undefined,
+    gradeDetected,
+    dateText
+  };
 }
 
 export function computeStats(sales: ParsedSale[]) {
@@ -174,20 +166,13 @@ export function computeStats(sales: ParsedSale[]) {
       ? sorted[(sorted.length - 1) / 2]
       : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
 
-  const currencyCounts = new Map<string, number>();
-  for (const s of sales) {
-    const c = (s.currency || "USD").toUpperCase();
-    currencyCounts.set(c, (currencyCounts.get(c) || 0) + 1);
-  }
-  const currency = [...currencyCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "USD";
-
   return {
     count: prices.length,
     avg: +(sum / sorted.length).toFixed(2),
     median: +median.toFixed(2),
     min: sorted[0],
     max: sorted[sorted.length - 1],
-    currency,
+    currency: "USD" as const,
   };
 }
 
@@ -195,7 +180,7 @@ export function buildEbaySoldQuery(input: {
   title?: string;
   issue?: string | number;
   grade?: string | number;
-  site?: string;         // default ebay.com
+  site?: string;
 }) {
   const site = (input.site || "ebay.com").replace(/^site:/i, "");
   const parts: string[] = [];
