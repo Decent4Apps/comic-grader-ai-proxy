@@ -42,12 +42,12 @@ export async function firecrawlSearchWithScrape(
       }
     });
 
-    if (!result.success || !result.data?.web) {
-      console.warn('[Firecrawl v2] Search returned no results');
+    if (!result.web || result.web.length === 0) {
+      console.warn('[Firecrawl v4] Search returned no results');
       return [];
     }
 
-    return result.data.web.map(item => ({
+    return result.web.map((item: any) => ({
       url: item.url,
       title: item.title,
       snippet: item.description,
