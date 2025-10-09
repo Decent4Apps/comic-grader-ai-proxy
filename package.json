@@ -16,14 +16,15 @@
     "vercel-build": "next build"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.3",
+    "@mendable/firecrawl-js": "^1.4.3",
+    "firecrawl": "^4.3.8",
     "next": "^14.2.5",
+    "openai": "^4.57.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "openai": "^4.57.0",
-    "@anthropic-ai/sdk": "^0.27.3",
     "superagent-ai": "^0.0.5",
-    "zod": "^3.23.8",
-    "@mendable/firecrawl-js": "^1.4.3"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
