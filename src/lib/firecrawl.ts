@@ -88,15 +88,38 @@ export function parseSaleFromMarkdown(
 
   const lines = md.split(/\r?\n/);
 
+  // Look for sold price specifically (more accurate)
+  const soldPricePatterns = [
+    /sold.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+    /price.*?\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+  ];
+
   for (const line of lines) {
     if (!price) {
-      PRICE_RE.lastIndex = 0;
-      const m = PRICE_RE.exec(line);
-      if (m) {
-        const val = Number(m[1].replace(/,/g, ""));
-        if (!Number.isNaN(val) && val > 0) {
-          price = val;
-          currency = USD_CURRENCY_HINT.test(line) ? "USD" : undefined;
+      // Try sold-specific patterns first
+      for (const pattern of soldPricePatterns) {
+        const soldMatch = pattern.exec(line);
+        if (soldMatch) {
+          const val = Number(soldMatch[1].replace(/,/g, ""));
+          if (!Number.isNaN(val) && val > 10 && val < 50000) { // Filter obvious outliers
+            price = val;
+            currency = "USD";
+            break;
+          }
+        }
+      }
+      
+      // Fall back to general price pattern
+      if (!price) {
+        PRICE_RE.lastIndex = 0;
+        const m = PRICE_RE.exec(line);
+        if (m) {
+          const val = Number(m[1].replace(/,/g, ""));
+          // Filter outliers: reasonable range for comics ($10-$50k)
+          if (!Number.isNaN(val) && val > 10 && val < 50000) {
+            price = val;
+            currency = USD_CURRENCY_HINT.test(line) ? "USD" : undefined;
+          }
         }
       }
     }
