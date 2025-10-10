@@ -1,88 +1,296 @@
-// app/api/firecrawl/search/route.ts
-export const runtime = "nodejs";
-export const maxDuration = 60;
+/**
+ * Multi-Provider AI API Route for Vercel
+ * Deploy this to your Vercel backend at: app/api/ai/route.ts
+ * 
+ * Supports: OpenAI, Anthropic, Google Gemini, X.AI Grok
+ * Routes based on model name in the request
+ */
 
-import { NextRequest } from "next/server";
-import {
-  searchWithScrape,
-  parseSaleFromMarkdown,
-  computeStats,
-  buildEbaySoldQuery,
-} from "@/src/lib/firecrawl";
+import { NextRequest, NextResponse } from 'next/server';
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+// Initialize clients
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+const gemini = new GoogleGenerativeAI(
+  process.env.GOOGLE_GEMINI_API_KEY || ''
+);
+
+const grok = new OpenAI({
+  apiKey: process.env.XAI_API_KEY,
+  baseURL: 'https://api.x.ai/v1',
+});
 
 export async function POST(req: NextRequest) {
-  const started = Date.now();
-
   try {
-    if (!process.env.FIRECRAWL_API_KEY) {
-      return new Response(JSON.stringify({ error: "Missing FIRECRAWL_API_KEY" }, null, 2), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      });
+    const body = await req.json();
+    const { model, messages, temperature, max_tokens, stream = false } = body;
+
+    console.log(`[AI API] Received request for model: ${model}`);
+
+    // Route to appropriate provider based on model name
+    if (model.startsWith('gpt-') || model.startsWith('o1-') || model.includes('gpt')) {
+      return await handleOpenAI(model, messages, { temperature, max_tokens, stream });
     }
-
-    const body = await req.json().catch(() => ({} as any));
-    const {
-      query: incomingQuery,
-      title,
-      issue,
-      grade,
-      site = "ebay.com",
-      limit = Number(process.env.FIRECRAWL_SEARCH_LIMIT || 6),
-    } = body || {};
-
-    const query = (incomingQuery?.trim() || buildEbaySoldQuery({ title, issue, grade, site }));
-
-    console.log('[Firecrawl Search v2] Query:', query, 'Limit:', limit);
-
-    // v2: Single call with scrapeOptions gets URLs + markdown
-    const results = await searchWithScrape(query, limit);
-
-    console.log('[Firecrawl Search v2] Got', results.length, 'results');
-
-    // Parse sales from markdown
-    const parsedSales = results.map(r => 
-      parseSaleFromMarkdown(r.url, r.title, r.markdown)
-    );
-
-    const validSales = parsedSales.filter(s => s.price && s.price > 0);
-    const stats = computeStats(validSales);
-
-    const failures = results
-      .map((r, idx) => ({
-        url: r.url,
-        title: r.title,
-        hadMarkdown: !!r.markdown && r.markdown.length > 0,
-        hadPrice: !!parsedSales[idx].price
-      }))
-      .filter(f => !f.hadMarkdown || !f.hadPrice)
-      .map(f => ({
-        url: f.url,
-        title: f.title,
-        reason: !f.hadMarkdown ? "no-markdown" : "no-price-found"
-      }));
-
-    const response = {
-      ok: true,
-      took_ms: Date.now() - started,
-      query,
-      inputs: { title, issue, grade, site, limit },
-      results_found: results.length,
-      sales: validSales,
-      stats,
-      failures,
-    };
-
-    return new Response(JSON.stringify(response, null, 2), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  } catch (err: any) {
-    console.error('[Firecrawl Search v2] Error:', err);
-    return new Response(
-      JSON.stringify({ error: "FIRECRAWL_SEARCH_FAILED", detail: String(err?.message || err) }, null, 2),
-      { status: 502, headers: { "content-type": "application/json" } }
+    else if (model.startsWith('claude-') || model.includes('claude')) {
+      return await handleAnthropic(model, messages, { temperature, max_tokens });
+    }
+    else if (model.startsWith('gemini-') || model.includes('gemini')) {
+      return await handleGemini(model, messages, { temperature, max_tokens });
+    }
+    else if (model.startsWith('grok-') || model.includes('grok')) {
+      return await handleGrok(model, messages, { temperature, max_tokens, stream });
+    }
+    else {
+      console.error(`[AI API] Unknown model: ${model}`);
+      return NextResponse.json(
+        { error: `Unknown model: ${model}. Supported: gpt-*, claude-*, gemini-*, grok-*` },
+        { status: 400 }
+      );
+    }
+  } catch (error) {
+    console.error('[AI API] Error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal server error' },
+      { status: 500 }
     );
   }
 }
+
+/**
+ * Handle OpenAI requests
+ */
+async function handleOpenAI(
+  model: string,
+  messages: any[],
+  options: { temperature?: number; max_tokens?: number; stream?: boolean }
+) {
+  try {
+    console.log(`[OpenAI] Calling ${model}...`);
+    
+    const completion = await openai.chat.completions.create({
+      model,
+      messages,
+      temperature: options.temperature,
+      max_tokens: options.max_tokens,
+      stream: options.stream || false,
+    });
+
+    // Return in OpenAI-compatible format
+    return NextResponse.json({
+      id: completion.id,
+      object: 'chat.completion',
+      created: completion.created,
+      model: completion.model,
+      choices: completion.choices,
+      usage: completion.usage,
+    });
+  } catch (error) {
+    console.error('[OpenAI] Error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle Anthropic Claude requests
+ */
+async function handleAnthropic(
+  model: string,
+  messages: any[],
+  options: { temperature?: number; max_tokens?: number }
+) {
+  try {
+    console.log(`[Anthropic] Calling ${model}...`);
+
+    // Convert OpenAI format to Anthropic format
+    const systemMessage = messages.find(m => m.role === 'system');
+    const userMessages = messages.filter(m => m.role !== 'system');
+
+    // Handle vision messages (images)
+    const anthropicMessages = userMessages.map(msg => {
+      if (Array.isArray(msg.content)) {
+        // Convert OpenAI image format to Anthropic format
+        const content = msg.content.map((item: any) => {
+          if (item.type === 'image_url') {
+            // Extract base64 data
+            const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
+            return {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/jpeg',
+                data: base64Data,
+              },
+            };
+          } else if (item.type === 'text') {
+            return {
+              type: 'text',
+              text: item.text,
+            };
+          }
+          return item;
+        });
+        return { role: msg.role, content };
+      }
+      return { role: msg.role, content: msg.content };
+    });
+
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: options.max_tokens || 4096,
+      temperature: options.temperature,
+      system: systemMessage?.content,
+      messages: anthropicMessages,
+    });
+
+    // Convert Anthropic response to OpenAI format
+    return NextResponse.json({
+      id: response.id,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: response.model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: response.content[0].type === 'text' ? response.content[0].text : '',
+          },
+          finish_reason: response.stop_reason,
+        },
+      ],
+      usage: {
+        prompt_tokens: response.usage.input_tokens,
+        completion_tokens: response.usage.output_tokens,
+        total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+      },
+    });
+  } catch (error) {
+    console.error('[Anthropic] Error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle Google Gemini requests
+ */
+async function handleGemini(
+  model: string,
+  messages: any[],
+  options: { temperature?: number; max_tokens?: number }
+) {
+  try {
+    console.log(`[Gemini] Calling ${model}...`);
+
+    const geminiModel = gemini.getGenerativeModel({ model });
+
+    // Convert messages to Gemini format
+    const contents = messages.map(msg => {
+      if (Array.isArray(msg.content)) {
+        // Handle vision messages
+        const parts = msg.content.map((item: any) => {
+          if (item.type === 'image_url') {
+            const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
+            return {
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: base64Data,
+              },
+            };
+          } else if (item.type === 'text') {
+            return { text: item.text };
+          }
+          return item;
+        });
+        return { role: msg.role === 'assistant' ? 'model' : 'user', parts };
+      }
+      return {
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }],
+      };
+    });
+
+    const result = await geminiModel.generateContent({
+      contents,
+      generationConfig: {
+        temperature: options.temperature,
+        maxOutputTokens: options.max_tokens,
+      },
+    });
+
+    const response = result.response;
+    const text = response.text();
+
+    // Convert to OpenAI format
+    return NextResponse.json({
+      id: `gemini-${Date.now()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: text,
+          },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: {
+        prompt_tokens: 0, // Gemini doesn't provide token counts easily
+        completion_tokens: 0,
+        total_tokens: 0,
+      },
+    });
+  } catch (error) {
+    console.error('[Gemini] Error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle X.AI Grok requests
+ */
+async function handleGrok(
+  model: string,
+  messages: any[],
+  options: { temperature?: number; max_tokens?: number; stream?: boolean }
+) {
+  try {
+    console.log(`[Grok] Calling ${model}...`);
+
+    // Grok uses OpenAI-compatible API
+    const completion = await grok.chat.completions.create({
+      model,
+      messages,
+      temperature: options.temperature,
+      max_tokens: options.max_tokens,
+      stream: options.stream || false,
+    });
+
+    return NextResponse.json({
+      id: completion.id,
+      object: 'chat.completion',
+      created: completion.created,
+      model: completion.model,
+      choices: completion.choices,
+      usage: completion.usage,
+    });
+  } catch (error) {
+    console.error('[Grok] Error:', error);
+    throw error;
+  }
+}
+
+export const runtime = 'nodejs';
+export const maxDuration = 60; // 60 seconds for Vercel Pro
 
