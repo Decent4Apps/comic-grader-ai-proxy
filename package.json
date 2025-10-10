@@ -2,7 +2,7 @@
   "name": "comic-grader-ai-proxy",
   "version": "1.0.0",
   "private": true,
-  "description": "Vercel proxy + Firecrawl pricing endpoint with Superagent Guard for ComicGraderAI",
+  "description": "Vercel proxy + Firecrawl pricing endpoint with Superagent Guard for ComicGraderAI - Multi-AI support",
   "license": "MIT",
   "engines": {
     "node": "20.x"
@@ -16,11 +16,12 @@
     "vercel-build": "next build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.27.3",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.21.0",
     "@mendable/firecrawl-js": "^1.4.3",
     "firecrawl": "^4.3.8",
     "next": "^14.2.5",
-    "openai": "^4.57.0",
+    "openai": "^4.89.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "superagent-ai": "^0.0.5",
@@ -38,3 +39,4 @@
     "typescript": "^5.5.4"
   }
 }
+
