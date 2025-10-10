@@ -81,7 +81,7 @@ async function handleOpenAI(
       messages,
       temperature: options.temperature,
       max_tokens: options.max_tokens,
-      stream: options.stream || false,
+      stream: false, // Must be explicitly false for TypeScript
     });
 
     // Return in OpenAI-compatible format
@@ -274,7 +274,7 @@ async function handleGrok(
       messages,
       temperature: options.temperature,
       max_tokens: options.max_tokens,
-      stream: options.stream || false,
+      stream: false, // Must be explicitly false for TypeScript
     });
 
     return NextResponse.json({
