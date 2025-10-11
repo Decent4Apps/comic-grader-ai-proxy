@@ -2,14 +2,14 @@
 export const runtime = 'edge';
 
 export async function GET() {
-  const vars = {
+  const ok = {
     SUPERAGENT_PROXY_URL: !!process.env.SUPERAGENT_PROXY_URL,
     SUPERAGENT_API_KEY: !!process.env.SUPERAGENT_API_KEY,
     DEFAULT_MODEL: process.env.DEFAULT_MODEL || 'gpt-4o-mini',
     ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
   };
 
-  const missing = Object.entries(vars)
+  const missing = Object.entries(ok)
     .filter(([k, v]) => !v && k !== 'DEFAULT_MODEL')
     .map(([k]) => k);
 
@@ -19,9 +19,12 @@ export async function GET() {
     JSON.stringify(
       {
         status,
-        ok: vars,
+        ok,
         missing,
-        SUPERAGENT_PROXY_URL_preview: (process.env.SUPERAGENT_PROXY_URL || '').replace(/(firewall\.superagent\.sh\/)[^/]+/, '$1<config_id>'),
+        SUPERAGENT_PROXY_URL_preview: (process.env.SUPERAGENT_PROXY_URL || '').replace(
+          /(firewall\.superagent\.sh\/)[^/]+/,
+          '$1<config_id>'
+        ),
       },
       null,
       2
