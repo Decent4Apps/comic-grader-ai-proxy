@@ -1,25 +1,29 @@
 // app/api/ai/route.ts
 /**
  * AI Proxy (Node runtime)
- * - Superagent Firewall (OpenAI-compatible) WITHOUT using Authorization for sa_ key
- * - Headers: send Superagent key via gateway headers (not Authorization)
- * - Adds: idempotency cache, short debounce, per-device concurrency cap (max 2)
- * - Avoids gzip from upstream with Accept-Encoding: identity
+ * - Superagent Firewall (OpenAI-compatible) WITHOUT Authorization: Bearer sa_...
+ * - Sends Superagent key via gateway headers only (x-api-key, x-superagent-api-key, x-superagent-token)
+ * - Forces identity encoding to avoid gzip JSON/SSE issues
+ * - Duplicate-call control:
+ *    • Auto idempotency (30s) even if client doesn't send x-idempotency-key
+ *    • 400ms debounce for burst-clicks
+ *    • Per-device concurrency cap: 2
+ * - Optional Anthropic direct path
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
-// ---------- Env ----------
+// ---------- Environment ----------
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gpt-4o-mini';
 const SUPERAGENT_PROXY_URL = normalizeBase(process.env.SUPERAGENT_PROXY_URL); // e.g. https://firewall.superagent.sh/<config_id>/v1
-const SUPERAGENT_API_KEY = process.env.SUPERAGENT_API_KEY || '';              // e.g. sa_xxx
+const SUPERAGENT_API_KEY = (process.env.SUPERAGENT_API_KEY || '').trim();
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const ANTHROPIC_API_KEY = (process.env.ANTHROPIC_API_KEY || '').trim();
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
 function normalizeBase(raw?: string) {
@@ -34,96 +38,109 @@ const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'POST, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization, x-idempotency-key, x-device-id',
-};
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: CORS_HEADERS as any });
+} as const;
+
+function withCors(r: Response) {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => r.headers.set(k, v as string));
+  return r;
 }
 
-// ---------- In-memory guards (stateless within a single lambda instance) ----------
+export async function OPTIONS() {
+  return withCors(new Response(null, { status: 204 }));
+}
+
+// ---------- Duplicate/Concurrency Control (in-memory within instance) ----------
 type CacheEntry = { status: number; body: string; ts: number };
-const IDEMPOTENCY_CACHE = new Map<string, CacheEntry>(); // 30s cache
-const RECENT_KEYS = new Map<string, number>();           // 400ms debounce
-const CONCURRENCY = new Map<string, number>();           // active per device
+const IDEMPOTENCY_CACHE = new Map<string, CacheEntry>(); // 30s
+const RECENT_KEYS = new Map<string, number>(); // 400ms debounce
+const CONCURRENCY = new Map<string, number>(); // per device
+
 const IDEMPOTENCY_TTL_MS = 30_000;
 const DEBOUNCE_MS = 400;
 const MAX_CONCURRENCY_PER_DEVICE = 2;
 
-function withCors(r: Response) {
-  Object.entries(CORS_HEADERS).forEach(([k, v]) => r.headers.set(k, v));
-  return r;
+function cleanupCaches() {
+  const cutoff = Date.now() - IDEMPOTENCY_TTL_MS;
+  for (const [k, v] of IDEMPOTENCY_CACHE) if (v.ts < cutoff) IDEMPOTENCY_CACHE.delete(k);
+  const recentCutoff = Date.now() - DEBOUNCE_MS;
+  for (const [k, v] of RECENT_KEYS) if (v < recentCutoff) RECENT_KEYS.delete(k);
 }
-function json(res: any, status = 200) {
+
+function tinyHash(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function json(data: any, status = 200) {
   return withCors(
-    new Response(JSON.stringify(res, null, 2), {
+    new Response(JSON.stringify(data, null, 2), {
       status,
       headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
     })
   );
 }
 
-function now() { return Date.now(); }
-function cleanupCaches() {
-  const cutoff = now() - IDEMPOTENCY_TTL_MS;
-  for (const [k, v] of IDEMPOTENCY_CACHE) if (v.ts < cutoff) IDEMPOTENCY_CACHE.delete(k);
-  const recentCutoff = now() - DEBOUNCE_MS;
-  for (const [k, t] of RECENT_KEYS) if (t < recentCutoff) RECENT_KEYS.delete(k);
-}
-
-function hashish(obj: any) {
-  const s = typeof obj === 'string' ? obj : JSON.stringify(obj);
-  // tiny non-crypto hash
-  let h = 0;
-  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
-  return `${h >>> 0}`;
+function cacheIdem(idemKey: string | undefined, res: Response) {
+  if (!idemKey) return;
+  // Clone once to read text body
+  res
+    .clone()
+    .text()
+    .then((body) => IDEMPOTENCY_CACHE.set(idemKey, { status: res.status, body, ts: Date.now() }))
+    .catch(() => {});
 }
 
 export async function POST(req: NextRequest) {
-  const started = Date.now();
   cleanupCaches();
 
-  // ---------- Headers from client ----------
-  const deviceId = (req.headers.get('x-device-id') || 'anon').slice(0, 100);
-  const idem = (req.headers.get('x-idempotency-key') || '').slice(0, 200);
-
-  // ---------- Idempotency (return cached result if present) ----------
-  if (idem) {
-    const cached = IDEMPOTENCY_CACHE.get(idem);
-    if (cached && now() - cached.ts < IDEMPOTENCY_TTL_MS) {
-      const r = new Response(cached.body, {
-        status: cached.status,
-        headers: {
-          'content-type': 'application/json; charset=utf-8',
-          'x-idempotent': 'true',
-          'cache-control': 'no-store',
-        },
-      });
-      return withCors(r);
-    }
+  // Strip incoming Authorization (we never forward it)
+  const incomingAuth = req.headers.get('authorization');
+  if (incomingAuth) {
+    console.warn('[AI API] Stripping incoming Authorization header from client');
   }
 
-  // ---------- Debounce (collapse bursts within 400ms) ----------
+  // Read identifiers & body text early
+  const deviceId = (req.headers.get('x-device-id') || 'anon').slice(0, 100);
+  let idem = (req.headers.get('x-idempotency-key') || '').slice(0, 200);
   const rawBody = await req.text();
-  const key = hashish(rawBody + deviceId);
-  const last = RECENT_KEYS.get(key) || 0;
-  if (now() - last < DEBOUNCE_MS) {
+
+  // Auto-idempotency when client doesn't supply one
+  if (!idem) idem = `auto:${deviceId}:${tinyHash(rawBody)}`;
+
+  // Serve cached response if within TTL
+  const cached = IDEMPOTENCY_CACHE.get(idem);
+  if (cached && Date.now() - cached.ts < IDEMPOTENCY_TTL_MS) {
+    return withCors(
+      new Response(cached.body, {
+        status: cached.status,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'x-idempotent': 'true' },
+      })
+    );
+  }
+
+  // Debounce burst duplicates within 400ms
+  const debounceKey = tinyHash(rawBody + ':' + deviceId);
+  const last = RECENT_KEYS.get(debounceKey) || 0;
+  if (Date.now() - last < DEBOUNCE_MS) {
     return json({ duplicated: true, reason: 'debounced', window_ms: DEBOUNCE_MS }, 202);
   }
-  RECENT_KEYS.set(key, now());
+  RECENT_KEYS.set(debounceKey, Date.now());
 
-  // ---------- Concurrency gate ----------
+  // Per-device concurrency cap
   const active = CONCURRENCY.get(deviceId) || 0;
   if (active >= MAX_CONCURRENCY_PER_DEVICE) {
     return json({ error: 'Too many concurrent requests', max: MAX_CONCURRENCY_PER_DEVICE }, 429);
   }
   CONCURRENCY.set(deviceId, active + 1);
 
-  // ---------- Main logic ----------
   try {
     const body = safeParse(rawBody) || {};
     const model: string = body.model || DEFAULT_MODEL;
     const stream: boolean = !!body.stream;
     const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
 
+    // Anthropic direct path
     if (model.startsWith('claude-')) {
       if (!anthropic) return json({ error: 'Anthropic not configured' }, 400);
       const res = await handleAnthropic({ model, messages, temperature: body.temperature, max_tokens: body.max_tokens });
@@ -131,7 +148,7 @@ export async function POST(req: NextRequest) {
       return res;
     }
 
-    // Superagent Firewall (OpenAI-compatible) path
+    // Superagent (OpenAI-compatible) path
     if (!SUPERAGENT_PROXY_URL || !SUPERAGENT_API_KEY) {
       return json({
         error: 'Missing SUPERAGENT_PROXY_URL or SUPERAGENT_API_KEY',
@@ -140,16 +157,16 @@ export async function POST(req: NextRequest) {
     }
 
     const res = stream
-      ? await proxyOpenAIStream({ body, started })
-      : await proxyOpenAINonStream({ body, started });
+      ? await proxyOpenAIStream({ body, started: Date.now() })
+      : await proxyOpenAINonStream({ body, started: Date.now() });
 
-    cacheIdem(idem, res);
+    // Cache only non-stream responses (SSE is not easily cacheable here)
+    if (!stream) cacheIdem(idem, res);
     return res;
   } catch (err: any) {
     console.error('[AI API] Uncaught error:', err);
     return json({ error: 'AI proxy error', detail: err?.stack || String(err) }, 500);
   } finally {
-    // release one slot
     const curr = CONCURRENCY.get(deviceId) || 1;
     CONCURRENCY.set(deviceId, Math.max(0, curr - 1));
   }
@@ -157,20 +174,22 @@ export async function POST(req: NextRequest) {
 
 // ---------- Superagent (OpenAI-compatible) ----------
 
-async function proxyOpenAINonStream({ body, started }: { body: any; started: number; }) {
+async function proxyOpenAINonStream({ body, started }: { body: any; started: number }) {
   const url = `${SUPERAGENT_PROXY_URL}/chat/completions`;
+
+  // Build upstream headers (IMPORTANT: no Authorization)
+  const upstreamHeaders: Record<string, string> = {
+    'x-api-key': SUPERAGENT_API_KEY,
+    'x-superagent-api-key': SUPERAGENT_API_KEY,
+    'x-superagent-token': SUPERAGENT_API_KEY,
+    'content-type': 'application/json',
+    'accept': 'application/json',
+    'accept-encoding': 'identity', // avoid gzip JSON
+  };
 
   const upstream = await fetch(url, {
     method: 'POST',
-    headers: {
-      // IMPORTANT: do NOT send Authorization: Bearer sa_...
-      // Send Superagent key using gateway headers (support both common names)
-      'x-api-key': SUPERAGENT_API_KEY,
-      'x-superagent-api-key': SUPERAGENT_API_KEY,
-      'content-type': 'application/json',
-      'accept': 'application/json',
-      'accept-encoding': 'identity', // avoid gzip JSON
-    },
+    headers: upstreamHeaders,
     body: JSON.stringify({
       model: body.model || DEFAULT_MODEL,
       messages: body.messages,
@@ -188,10 +207,9 @@ async function proxyOpenAINonStream({ body, started }: { body: any; started: num
   const text = await upstream.text();
 
   if (!upstream.ok) {
-    // If you still see OpenAI-style error payloads complaining about sa_ key,
-    // your firewall is still forwarding Authorization to OpenAI (we’re not sending it here).
+    // If OpenAI-style error mentions sa_ key, some layer is still sending Authorization → verify nothing sets it.
     console.error('[OpenAI via Superagent] Non-OK:', upstream.status, text.slice(0, 500));
-    return json({ error: 'Upstream (Superagent) error', status: upstream.status, detail: safeParse(text) }, upstream.status);
+    return json({ error: 'Upstream (Superagent) error', status: upstream.status, detail: safeParse(text) ?? text }, upstream.status);
   }
 
   try {
@@ -199,35 +217,38 @@ async function proxyOpenAINonStream({ body, started }: { body: any; started: num
     const took = Date.now() - started;
     return json({ ...data, _meta: { upstream: 'superagent', took_ms: took } }, 200);
   } catch (e) {
-    console.error('[OpenAI via Superagent] JSON parse error. First 40 bytes:', text.slice(0, 40));
+    console.error('[OpenAI via Superagent] JSON parse error. First bytes:', text.slice(0, 40));
     return json({
       error: 'Invalid JSON from upstream (likely compressed)',
-      hint: 'We send Accept-Encoding: identity. If this persists, check the gateway config for forced compression.',
+      hint: 'We send Accept-Encoding: identity. If this persists, check gateway config for forced compression.',
       preview: text.slice(0, 120),
     }, 502);
   }
 }
 
-async function proxyOpenAIStream({ body, started }: { body: any; started: number; }) {
+async function proxyOpenAIStream({ body, started }: { body: any; started: number }) {
   const url = `${SUPERAGENT_PROXY_URL}/chat/completions`;
+
+  const upstreamHeaders: Record<string, string> = {
+    'x-api-key': SUPERAGENT_API_KEY,
+    'x-superagent-api-key': SUPERAGENT_API_KEY,
+    'x-superagent-token': SUPERAGENT_API_KEY,
+    'content-type': 'application/json',
+    'accept': 'text/event-stream',
+    'accept-encoding': 'identity', // avoid gzip’d SSE
+  };
 
   const upstream = await fetch(url, {
     method: 'POST',
-    headers: {
-      'x-api-key': SUPERAGENT_API_KEY,
-      'x-superagent-api-key': SUPERAGENT_API_KEY,
-      'content-type': 'application/json',
-      'accept': 'text/event-stream',
-      'accept-encoding': 'identity', // avoid gzip’d SSE
-    },
+    headers: upstreamHeaders,
     body: JSON.stringify({ ...body, model: body.model || DEFAULT_MODEL, stream: true }),
   });
 
   if (!upstream.ok) {
     const errText = await upstream.text();
     console.error('[OpenAI via Superagent][stream] Non-OK:', upstream.status, errText.slice(0, 500));
-    return json({ error: 'Upstream (Superagent) error', status: upstream.status, detail: safeParse(errText) }, upstream.status);
-    }
+    return json({ error: 'Upstream (Superagent) error', status: upstream.status, detail: safeParse(errText) ?? errText }, upstream.status);
+  }
 
   const readable = upstream.body;
   if (!readable) return json({ error: 'Upstream returned empty body' }, 502);
@@ -245,14 +266,16 @@ async function proxyOpenAIStream({ body, started }: { body: any; started: number
 }
 
 // ---------- Anthropic ----------
-async function handleAnthropic(opts: { model: string; messages: any[]; temperature?: number; max_tokens?: number; }) {
+async function handleAnthropic(opts: { model: string; messages: any[]; temperature?: number; max_tokens?: number }) {
   const { model, messages, temperature, max_tokens } = opts;
 
   const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
-  const chat = messages.filter((m) => m.role !== 'system').map((m) => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-  }));
+  const chat = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+    }));
 
   try {
     const r = await anthropic!.messages.create({
@@ -273,14 +296,20 @@ async function handleAnthropic(opts: { model: string; messages: any[]; temperatu
       _meta: { upstream: 'anthropic' },
     });
   } catch (e: any) {
-    // Surface Anthropic 429 with retry hints
     const code = e?.status || 500;
-    const retryAt = e?.headers?.get?.('retry-after') || e?.headers?.get?.('anthropic-ratelimit-input-tokens-reset');
+    const retryAt =
+      e?.headers?.get?.('retry-after') ||
+      e?.headers?.get?.('anthropic-ratelimit-input-tokens-reset') ||
+      e?.headers?.get?.('anthropic-ratelimit-requests-reset');
     return json({ error: 'Anthropic error', status: code, detail: e?.message || String(e), retry_after: retryAt }, code);
   }
 }
 
 // ---------- Utils ----------
-function safeParse(s: string) { try { return JSON.parse(s); } catch { return undefined; } }
-
-// no GET handler
+function safeParse(s: string) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
