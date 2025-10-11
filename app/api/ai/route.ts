@@ -3,14 +3,17 @@ export const runtime = "nodejs";
 export const maxDuration = 15;
 
 /**
- * This route:
+ * What this route does
  * - Detects if the request includes images
- * - For image jobs → only uses *vision-capable* providers (OpenAI gpt-4o / Anthropic Claude 3.5 Sonnet)
- * - For text jobs → tries your preferred text provider, then falls back to others
+ * - If images → only uses *vision-capable* models (OpenAI gpt-4o / Anthropic Claude 3.5 Sonnet)
+ * - If text → tries your preferred text provider then falls back to others
  * - Returns the first successful response (others can fail without breaking the call)
- * - Sends OpenAI traffic *through Superagent* if SUPERAGENT_PROXY_URL is set, while keeping YOUR OpenAI key
- * - Forces `Accept-Encoding: identity` to avoid gzip "Unexpected token 0x1F" issues
+ * - Sends OpenAI traffic *through Superagent* if SUPERAGENT_PROXY_URL is set
+ *   (Authorization remains your OpenAI key — per Superagent proxy mode)
+ * - Forces `Accept-Encoding: identity` to avoid gzip parse issues
  */
+
+type Provider = "openai" | "anthropic" | "gemini" | "grok";
 
 type ContentPart =
   | { type: "text"; text: string }
@@ -22,15 +25,12 @@ type ChatMessage =
   | { role: "user" | "assistant"; content: ContentPart[] };
 
 type AiRequest = {
-  // Optional per-request override
-  provider?: "openai" | "anthropic" | "gemini" | "grok";
-  model?: string;
-
+  provider?: Provider;   // optional per-request override
+  model?: string;        // optional per-request override
   messages: ChatMessage[];
   temperature?: number;
   max_tokens?: number;
-  // Optional: force-flag if the caller knows it's a vision job
-  forceVision?: boolean;
+  forceVision?: boolean; // optional hint: treat as a vision job
 };
 
 type AiSuccess = { provider: string; model: string; text: string };
@@ -42,15 +42,11 @@ const ENV = {
   GOOGLE_API_KEY: process.env.GOOGLE_API_KEY || "",
   XAI_API_KEY: process.env.XAI_API_KEY || "",
 
-  // If present, all OpenAI calls go through Superagent as an OpenAI-compatible proxy.
+  // OpenAI-compatible proxy base. If present, OpenAI calls go through Superagent.
   SUPERAGENT_PROXY_URL: process.env.SUPERAGENT_PROXY_URL || "", // e.g. https://firewall.superagent.sh/<config_id>/v1
 
-  DEFAULT_TEXT_PROVIDER: (process.env.DEFAULT_TEXT_PROVIDER || "anthropic") as NonNullable<
-    AiRequest["provider"]
-  >,
-  DEFAULT_VISION_PROVIDER: (process.env.DEFAULT_VISION_PROVIDER || "openai") as NonNullable<
-    AiRequest["provider"]
-  >,
+  DEFAULT_TEXT_PROVIDER: (process.env.DEFAULT_TEXT_PROVIDER || "anthropic") as Provider,
+  DEFAULT_VISION_PROVIDER: (process.env.DEFAULT_VISION_PROVIDER || "openai") as Provider,
 
   OPENAI_MODEL_TEXT: process.env.OPENAI_MODEL_TEXT || "gpt-4o-mini",
   OPENAI_MODEL_VISION: process.env.OPENAI_MODEL_VISION || "gpt-4o",
@@ -74,8 +70,13 @@ function json(status: number, data: any): Response {
 }
 
 function hasImageInput(messages: ChatMessage[]): boolean {
-  return messages.some((m) => Array.isArray((m as any).content) &&
-    (m as any).content.some((c: ContentPart) => c?.type === "image_url" || c?.type === "image_b64"));
+  return messages.some(
+    (m) =>
+      Array.isArray((m as any).content) &&
+      (m as any).content.some(
+        (c: ContentPart) => c?.type === "image_url" || c?.type === "image_b64"
+      )
+  );
 }
 
 // Map to OpenAI Chat Completions content (supports text + image_url/data URI)
@@ -124,7 +125,7 @@ function toAnthropicMessages(messages: ChatMessage[]): any[] {
               source: { type: "base64", media_type: "image/jpeg", data: rest },
             });
           } else {
-            // For remote URLs, you can optionally fetch and b64-encode here.
+            // Optional: fetch & b64-encode remote URLs here if needed.
             parts.push({ type: "text", text: `[image: ${url}]` });
           }
         }
@@ -303,7 +304,7 @@ async function callGrok(model: string, body: AiRequest): Promise<AiSuccess> {
 
 // ---------- routing ---------------------------------------------------------
 
-function pickCandidates(req: AiRequest): { provider: NonNullable<AiRequest["provider"]>; model: string }[] {
+function pickCandidates(req: AiRequest): { provider: Provider; model: string }[] {
   const needsVision = req.forceVision || hasImageInput(req.messages);
 
   // Respect explicit override if sensible (don’t allow text-only with images)
@@ -316,24 +317,23 @@ function pickCandidates(req: AiRequest): { provider: NonNullable<AiRequest["prov
   }
 
   if (needsVision) {
-    // Vision-capable only
-    const primary =
-      ENV.DEFAULT_VISION_PROVIDER === "anthropic"
-        ? [{ provider: "anthropic", model: ENV.ANTHROPIC_MODEL_VISION }]
-        : [{ provider: "openai", model: ENV.OPENAI_MODEL_VISION }];
-
-    const fallback =
-      primary[0].provider === "openai"
-        ? [{ provider: "anthropic", model: ENV.ANTHROPIC_MODEL_VISION }]
-        : [{ provider: "openai", model: ENV.OPENAI_MODEL_VISION }];
-
-    return [...primary, ...fallback];
+    // Vision-capable only — return concrete arrays to preserve literal types
+    if (ENV.DEFAULT_VISION_PROVIDER === "anthropic") {
+      return [
+        { provider: "anthropic", model: ENV.ANTHROPIC_MODEL_VISION },
+        { provider: "openai", model: ENV.OPENAI_MODEL_VISION },
+      ];
+    } else {
+      return [
+        { provider: "openai", model: ENV.OPENAI_MODEL_VISION },
+        { provider: "anthropic", model: ENV.ANTHROPIC_MODEL_VISION },
+      ];
+    }
   }
 
   // Text candidates
-  const order: NonNullable<AiRequest["provider"]>[] = ["anthropic", "openai", "gemini", "grok"];
-  // Place DEFAULT_TEXT_PROVIDER first
-  const sorted = [
+  const order: Provider[] = ["anthropic", "openai", "gemini", "grok"];
+  const sorted: Provider[] = [
     ENV.DEFAULT_TEXT_PROVIDER,
     ...order.filter((p) => p !== ENV.DEFAULT_TEXT_PROVIDER),
   ];
@@ -348,8 +348,6 @@ function pickCandidates(req: AiRequest): { provider: NonNullable<AiRequest["prov
         return { provider: "gemini", model: ENV.GEMINI_MODEL_TEXT };
       case "grok":
         return { provider: "grok", model: ENV.GROK_MODEL_TEXT };
-      default:
-        return { provider: "openai", model: ENV.OPENAI_MODEL_TEXT };
     }
   });
 }
