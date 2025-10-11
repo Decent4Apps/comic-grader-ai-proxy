@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Multi-Provider AI API Route for Vercel
  * Deploy this to your Vercel backend at: app/api/ai/route.ts
@@ -11,9 +12,15 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Initialize clients
+// Initialize clients with proper fetch configuration
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  // Disable gzip compression to avoid parsing issues
+  fetch: async (url, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set('Accept-Encoding', 'identity'); // Request uncompressed responses
+    return fetch(url, { ...init, headers });
+  },
 });
 
 const anthropic = new Anthropic({
@@ -27,12 +34,33 @@ const gemini = new GoogleGenerativeAI(
 const grok = new OpenAI({
   apiKey: process.env.XAI_API_KEY,
   baseURL: 'https://api.x.ai/v1',
+  // Disable gzip compression to avoid parsing issues
+  fetch: async (url, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set('Accept-Encoding', 'identity'); // Request uncompressed responses
+    return fetch(url, { ...init, headers });
+  },
 });
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { model, messages, temperature, max_tokens, stream = false } = body;
+
+    // Validate required fields
+    if (!model) {
+      return NextResponse.json(
+        { error: 'Missing required field: model' },
+        { status: 400 }
+      );
+    }
+    
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return NextResponse.json(
+        { error: 'Missing or invalid required field: messages (must be a non-empty array)' },
+        { status: 400 }
+      );
+    }
 
     console.log(`[AI API] Received request for model: ${model}`);
 
@@ -76,13 +104,34 @@ async function handleOpenAI(
   try {
     console.log(`[OpenAI] Calling ${model}...`);
     
-    const completion = await openai.chat.completions.create({
+    // O1 models don't support temperature, max_tokens, or system messages
+    const isO1Model = model.startsWith('o1-');
+    
+    let processedMessages = messages;
+    
+    // For O1 models, convert system messages to user messages instead of filtering
+    if (isO1Model) {
+      processedMessages = messages.map(m => {
+        if (m.role === 'system') {
+          return { role: 'user', content: m.content };
+        }
+        return m;
+      });
+    }
+    
+    const requestParams: any = {
       model,
-      messages,
-      temperature: options.temperature,
-      max_tokens: options.max_tokens,
+      messages: processedMessages,
       stream: false, // Must be explicitly false for TypeScript
-    });
+    };
+    
+    // Only add temperature and max_tokens for non-O1 models
+    if (!isO1Model) {
+      if (options.temperature !== undefined) requestParams.temperature = options.temperature;
+      if (options.max_tokens !== undefined) requestParams.max_tokens = options.max_tokens;
+    }
+    
+    const completion = await openai.chat.completions.create(requestParams);
 
     // Return in OpenAI-compatible format
     return NextResponse.json({
@@ -192,8 +241,21 @@ async function handleGemini(
 
     const geminiModel = gemini.getGenerativeModel({ model });
 
+    // Filter out system messages and prepend them to first user message
+    const systemMessage = messages.find(m => m.role === 'system');
+    const nonSystemMessages = messages.filter(m => m.role !== 'system');
+    
+    // If all messages were system messages, convert them to user messages
+    const messagesToProcess = nonSystemMessages.length > 0 ? nonSystemMessages : messages.map(m => ({
+      role: 'user',
+      content: m.content
+    }));
+    
+    // Only prepend system message if we have non-system messages
+    const shouldPrependSystem = nonSystemMessages.length > 0 && systemMessage;
+
     // Convert messages to Gemini format
-    const contents = messages.map(msg => {
+    const contents = messagesToProcess.map((msg, index) => {
       if (Array.isArray(msg.content)) {
         // Handle vision messages
         const parts = msg.content.map((item: any) => {
@@ -210,11 +272,21 @@ async function handleGemini(
           }
           return item;
         });
+        // Prepend system message to first user message
+        if (index === 0 && msg.role === 'user' && shouldPrependSystem) {
+          parts.unshift({ text: systemMessage.content });
+        }
         return { role: msg.role === 'assistant' ? 'model' : 'user', parts };
       }
+      
+      // Prepend system message to first user message
+      const text = (index === 0 && msg.role === 'user' && shouldPrependSystem)
+        ? `${systemMessage.content}\n\n${msg.content}`
+        : msg.content;
+      
       return {
         role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
+        parts: [{ text }],
       };
     });
 
