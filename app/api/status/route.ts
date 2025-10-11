@@ -1,29 +1,17 @@
 // app/api/status/route.ts
-export const runtime = "nodejs";
-
-function hasV1(url?: string) {
-  if (!url) return false;
-  const clean = url.trim().replace(/\/+$/, "");
-  return /\/v1$/i.test(clean);
-}
+export const runtime = 'edge';
 
 export async function GET() {
-  const env = {
-    SUPERAGENT_PROXY_URL_present: !!process.env.SUPERAGENT_PROXY_URL,
-    SUPERAGENT_PROXY_URL_preview:
-      (process.env.SUPERAGENT_PROXY_URL || "").replace(
-        /(firewall\.superagent\.sh\/[^/]+)\/?.*$/i,
-        "$1/…"
-      ) || null,
-    urlHasV1Suffix: hasV1(process.env.SUPERAGENT_PROXY_URL),
-    OPENAI_API_KEY_present: !!process.env.OPENAI_API_KEY,
-    DEFAULT_MODEL: process.env.DEFAULT_MODEL || "gpt-4o-mini",
-    runtime: "nodejs",
+  const vars = {
+    SUPERAGENT_PROXY_URL: !!process.env.SUPERAGENT_PROXY_URL,
+    SUPERAGENT_API_KEY: !!process.env.SUPERAGENT_API_KEY,
+    DEFAULT_MODEL: process.env.DEFAULT_MODEL || 'gpt-4o-mini',
+    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
   };
 
-  const missing: string[] = [];
-  if (!env.SUPERAGENT_PROXY_URL_present) missing.push("SUPERAGENT_PROXY_URL");
-  if (!env.OPENAI_API_KEY_present) missing.push("OPENAI_API_KEY");
+  const missing = Object.entries(vars)
+    .filter(([k, v]) => !v && k !== 'DEFAULT_MODEL')
+    .map(([k]) => k);
 
   const status = missing.length ? 500 : 200;
 
@@ -31,18 +19,13 @@ export async function GET() {
     JSON.stringify(
       {
         status,
-        ok: status === 200,
-        env,
+        ok: vars,
         missing,
-        hints: [
-          "SUPERAGENT_PROXY_URL may be set to https://firewall.superagent.sh/<FIREWALL_ID> (we add /v1 automatically).",
-          "OPENAI_API_KEY must be a valid OpenAI key (starts with sk-).",
-          "Check Vercel logs for detailed upstream errors from /api/ai.",
-        ],
+        SUPERAGENT_PROXY_URL_preview: (process.env.SUPERAGENT_PROXY_URL || '').replace(/(firewall\.superagent\.sh\/)[^/]+/, '$1<config_id>'),
       },
       null,
       2
     ),
-    { status, headers: { "content-type": "application/json" } }
+    { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } }
   );
 }
