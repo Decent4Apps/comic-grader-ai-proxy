@@ -9,11 +9,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+// import { GoogleGenerativeAI } from '@google/generative-ai'; // DISABLED: No vision support
 
 // Initialize clients with validation
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || '',
+  // Use default baseURL (proxy configured via environment)
 });
 
 const anthropic = new Anthropic({
