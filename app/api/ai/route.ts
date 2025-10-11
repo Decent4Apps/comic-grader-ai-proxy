@@ -199,116 +199,116 @@ async function handleAnthropic(
 }
 
 /**
- * Handle Google Gemini requests
+ * DISABLED: Gemini doesn't properly support vision
  */
-async function handleGemini(
-  model: string,
-  messages: any[],
-  options: { temperature?: number; max_tokens?: number }
-) {
-  try {
-    console.log(`[Gemini] Calling ${model}...`);
+// async function handleGemini(
+//   model: string,
+//   messages: any[],
+//   options: { temperature?: number; max_tokens?: number }
+// ) {
+//   try {
+//     console.log(`[Gemini] Calling ${model}...`);
 
-    const geminiModel = gemini.getGenerativeModel({ model });
+//     const geminiModel = gemini.getGenerativeModel({ model });
 
-    // Convert messages to Gemini format
-    const contents = messages.map(msg => {
-      if (Array.isArray(msg.content)) {
-        // Handle vision messages
-        const parts = msg.content.map((item: any) => {
-          if (item.type === 'image_url') {
-            const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
-            return {
-              inlineData: {
-                mimeType: 'image/jpeg',
-                data: base64Data,
-              },
-            };
-          } else if (item.type === 'text') {
-            return { text: item.text };
-          }
-          return item;
-        });
-        return { role: msg.role === 'assistant' ? 'model' : 'user', parts };
-      }
-      return {
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
-      };
-    });
+//     // Convert messages to Gemini format
+//     const contents = messages.map(msg => {
+//       if (Array.isArray(msg.content)) {
+//         // Handle vision messages
+//         const parts = msg.content.map((item: any) => {
+//           if (item.type === 'image_url') {
+//             const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
+//             return {
+//               inlineData: {
+//                 mimeType: 'image/jpeg',
+//                 data: base64Data,
+//               },
+//             };
+//           } else if (item.type === 'text') {
+//             return { text: item.text };
+//           }
+//           return item;
+//         });
+//         return { role: msg.role === 'assistant' ? 'model' : 'user', parts };
+//       }
+//       return {
+//         role: msg.role === 'assistant' ? 'model' : 'user',
+//         parts: [{ text: msg.content }],
+//       };
+//     });
 
-    const result = await geminiModel.generateContent({
-      contents,
-      generationConfig: {
-        temperature: options.temperature,
-        maxOutputTokens: options.max_tokens,
-      },
-    });
+//     const result = await geminiModel.generateContent({
+//       contents,
+//       generationConfig: {
+//         temperature: options.temperature,
+//         maxOutputTokens: options.max_tokens,
+//       },
+//     });
 
-    const response = result.response;
-    const text = response.text();
+//     const response = result.response;
+//     const text = response.text();
 
-    // Convert to OpenAI format
-    return NextResponse.json({
-      id: `gemini-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: text,
-          },
-          finish_reason: 'stop',
-        },
-      ],
-      usage: {
-        prompt_tokens: 0, // Gemini doesn't provide token counts easily
-        completion_tokens: 0,
-        total_tokens: 0,
-      },
-    });
-  } catch (error) {
-    console.error('[Gemini] Error:', error);
-    throw error;
-  }
-}
+//     // Convert to OpenAI format
+//     return NextResponse.json({
+//       id: `gemini-${Date.now()}`,
+//       object: 'chat.completion',
+//       created: Math.floor(Date.now() / 1000),
+//       model,
+//       choices: [
+//         {
+//           index: 0,
+//           message: {
+//             role: 'assistant',
+//             content: text,
+//           },
+//           finish_reason: 'stop',
+//         },
+//       ],
+//       usage: {
+//         prompt_tokens: 0, // Gemini doesn't provide token counts easily
+//         completion_tokens: 0,
+//         total_tokens: 0,
+//       },
+//     });
+//   } catch (error) {
+//     console.error('[Gemini] Error:', error);
+//     throw error;
+//   }
+// }
 
 /**
- * Handle X.AI Grok requests
+ * DISABLED: Grok doesn't support image inputs
  */
-async function handleGrok(
-  model: string,
-  messages: any[],
-  options: { temperature?: number; max_tokens?: number; stream?: boolean }
-) {
-  try {
-    console.log(`[Grok] Calling ${model}...`);
+// async function handleGrok(
+//   model: string,
+//   messages: any[],
+//   options: { temperature?: number; max_tokens?: number; stream?: boolean }
+// ) {
+//   try {
+//     console.log(`[Grok] Calling ${model}...`);
 
-    // Grok uses OpenAI-compatible API
-    const completion = await grok.chat.completions.create({
-      model,
-      messages,
-      temperature: options.temperature,
-      max_tokens: options.max_tokens,
-      stream: false, // Must be explicitly false for TypeScript
-    });
+//     // Grok uses OpenAI-compatible API
+//     const completion = await grok.chat.completions.create({
+//       model,
+//       messages,
+//       temperature: options.temperature,
+//       max_tokens: options.max_tokens,
+//       stream: false, // Must be explicitly false for TypeScript
+//     });
 
-    return NextResponse.json({
-      id: completion.id,
-      object: 'chat.completion',
-      created: completion.created,
-      model: completion.model,
-      choices: completion.choices,
-      usage: completion.usage,
-    });
-  } catch (error) {
-    console.error('[Grok] Error:', error);
-    throw error;
-  }
-}
+//     return NextResponse.json({
+//       id: completion.id,
+//       object: 'chat.completion',
+//       created: completion.created,
+//       model: completion.model,
+//       choices: completion.choices,
+//       usage: completion.usage,
+//     });
+//   } catch (error) {
+//     console.error('[Grok] Error:', error);
+//     throw error;
+//   }
+// }
 
 export const runtime = 'nodejs';
 export const maxDuration = 60; // 60 seconds for Vercel Pro
