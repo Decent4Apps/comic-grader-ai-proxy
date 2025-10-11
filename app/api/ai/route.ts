@@ -1,316 +1,231 @@
+// app/api/ai/route.ts
 /**
- * Multi-Provider AI API Route for Vercel
- * Deploy this to your Vercel backend at: app/api/ai/route.ts
- * 
- * Supports: OpenAI, Anthropic, Google Gemini, X.AI Grok
- * Routes based on model name in the request
+ * Multi-Provider AI API Route (Vercel, Node runtime)
+ * - OpenAI-compatible through Superagent Firewall (stateless proxy)
+ * - Anthropic direct (optional)
+ * - Streaming (SSE) passthrough supported
+ * - Forces upstream to return uncompressed JSON to avoid gzip parsing errors
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-// import { GoogleGenerativeAI } from '@google/generative-ai'; // DISABLED: No vision support
-
-// Initialize clients with validation
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || '',
-  // Use default baseURL (proxy configured via environment)
-});
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || '',
-});
-
-// Gemini and Grok disabled - they don't properly support vision
-// const gemini = new GoogleGenerativeAI(
-//   process.env.GOOGLE_GEMINI_API_KEY || 
-//   process.env.GEMINI_API_KEY || 
-//   process.env.GOOGLE_AI_API_KEY || 
-//   ''
-// );
-
-// const grok = new OpenAI({
-//   apiKey: process.env.XAI_API_KEY,
-//   baseURL: 'https://api.x.ai/v1',
-// });
-
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { model, messages, temperature, max_tokens, stream = false } = body;
-
-    console.log(`[AI API] Received request for model: ${model}`);
-
-    // Route to appropriate provider based on model name
-    // Only OpenAI and Anthropic are supported (vision-capable models)
-    if (model.startsWith('gpt-') || model.startsWith('o1-') || model.includes('gpt')) {
-      return await handleOpenAI(model, messages, { temperature, max_tokens, stream });
-    }
-    else if (model.startsWith('claude-') || model.includes('claude')) {
-      return await handleAnthropic(model, messages, { temperature, max_tokens });
-    }
-    else if (model.startsWith('gemini-') || model.includes('gemini')) {
-      console.log(`[AI API] Gemini disabled - no vision support`);
-      return NextResponse.json(
-        { error: `Gemini not supported - use GPT-4 or Claude instead` },
-        { status: 400 }
-      );
-    }
-    else if (model.startsWith('grok-') || model.includes('grok')) {
-      console.log(`[AI API] Grok disabled - no vision support`);
-      return NextResponse.json(
-        { error: `Grok not supported - use GPT-4 or Claude instead` },
-        { status: 400 }
-      );
-    }
-    else {
-      console.error(`[AI API] Unknown model: ${model}`);
-      return NextResponse.json(
-        { error: `Unknown model: ${model}. Supported: gpt-*, claude-*` },
-        { status: 400 }
-      );
-    }
-  } catch (error) {
-    console.error('[AI API] Error:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal server error' },
-      { status: 500 }
-    );
-  }
-}
-
-/**
- * Handle OpenAI requests
- */
-async function handleOpenAI(
-  model: string,
-  messages: any[],
-  options: { temperature?: number; max_tokens?: number; stream?: boolean }
-) {
-  try {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OpenAI API key not configured');
-    }
-    console.log(`[OpenAI] Calling ${model}...`);
-    
-    const completion = await openai.chat.completions.create({
-      model,
-      messages,
-      temperature: options.temperature,
-      max_tokens: options.max_tokens,
-      stream: false, // Must be explicitly false for TypeScript
-    });
-
-    // Return in OpenAI-compatible format
-    return NextResponse.json({
-      id: completion.id,
-      object: 'chat.completion',
-      created: completion.created,
-      model: completion.model,
-      choices: completion.choices,
-      usage: completion.usage,
-    });
-  } catch (error) {
-    console.error('[OpenAI] Error:', error);
-    throw error;
-  }
-}
-
-/**
- * Handle Anthropic Claude requests
- */
-async function handleAnthropic(
-  model: string,
-  messages: any[],
-  options: { temperature?: number; max_tokens?: number }
-) {
-  try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error('Anthropic API key not configured');
-    }
-    console.log(`[Anthropic] Calling ${model}...`);
-
-    // Convert OpenAI format to Anthropic format
-    const systemMessage = messages.find(m => m.role === 'system');
-    const userMessages = messages.filter(m => m.role !== 'system');
-
-    // Handle vision messages (images)
-    const anthropicMessages = userMessages.map(msg => {
-      if (Array.isArray(msg.content)) {
-        // Convert OpenAI image format to Anthropic format
-        const content = msg.content.map((item: any) => {
-          if (item.type === 'image_url') {
-            // Extract base64 data
-            const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
-            return {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/jpeg',
-                data: base64Data,
-              },
-            };
-          } else if (item.type === 'text') {
-            return {
-              type: 'text',
-              text: item.text,
-            };
-          }
-          return item;
-        });
-        return { role: msg.role, content };
-      }
-      return { role: msg.role, content: msg.content };
-    });
-
-    const response = await anthropic.messages.create({
-      model,
-      max_tokens: options.max_tokens || 4096,
-      temperature: options.temperature,
-      system: systemMessage?.content,
-      messages: anthropicMessages,
-    });
-
-    // Convert Anthropic response to OpenAI format
-    return NextResponse.json({
-      id: response.id,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: response.model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: response.content[0].type === 'text' ? response.content[0].text : '',
-          },
-          finish_reason: response.stop_reason,
-        },
-      ],
-      usage: {
-        prompt_tokens: response.usage.input_tokens,
-        completion_tokens: response.usage.output_tokens,
-        total_tokens: response.usage.input_tokens + response.usage.output_tokens,
-      },
-    });
-  } catch (error) {
-    console.error('[Anthropic] Error:', error);
-    throw error;
-  }
-}
-
-/**
- * DISABLED: Gemini doesn't properly support vision
- */
-// async function handleGemini(
-//   model: string,
-//   messages: any[],
-//   options: { temperature?: number; max_tokens?: number }
-// ) {
-//   try {
-//     console.log(`[Gemini] Calling ${model}...`);
-
-//     const geminiModel = gemini.getGenerativeModel({ model });
-
-//     // Convert messages to Gemini format
-//     const contents = messages.map(msg => {
-//       if (Array.isArray(msg.content)) {
-//         // Handle vision messages
-//         const parts = msg.content.map((item: any) => {
-//           if (item.type === 'image_url') {
-//             const base64Data = item.image_url.url.replace(/^data:image\/\w+;base64,/, '');
-//             return {
-//               inlineData: {
-//                 mimeType: 'image/jpeg',
-//                 data: base64Data,
-//               },
-//             };
-//           } else if (item.type === 'text') {
-//             return { text: item.text };
-//           }
-//           return item;
-//         });
-//         return { role: msg.role === 'assistant' ? 'model' : 'user', parts };
-//       }
-//       return {
-//         role: msg.role === 'assistant' ? 'model' : 'user',
-//         parts: [{ text: msg.content }],
-//       };
-//     });
-
-//     const result = await geminiModel.generateContent({
-//       contents,
-//       generationConfig: {
-//         temperature: options.temperature,
-//         maxOutputTokens: options.max_tokens,
-//       },
-//     });
-
-//     const response = result.response;
-//     const text = response.text();
-
-//     // Convert to OpenAI format
-//     return NextResponse.json({
-//       id: `gemini-${Date.now()}`,
-//       object: 'chat.completion',
-//       created: Math.floor(Date.now() / 1000),
-//       model,
-//       choices: [
-//         {
-//           index: 0,
-//           message: {
-//             role: 'assistant',
-//             content: text,
-//           },
-//           finish_reason: 'stop',
-//         },
-//       ],
-//       usage: {
-//         prompt_tokens: 0, // Gemini doesn't provide token counts easily
-//         completion_tokens: 0,
-//         total_tokens: 0,
-//       },
-//     });
-//   } catch (error) {
-//     console.error('[Gemini] Error:', error);
-//     throw error;
-//   }
-// }
-
-/**
- * DISABLED: Grok doesn't support image inputs
- */
-// async function handleGrok(
-//   model: string,
-//   messages: any[],
-//   options: { temperature?: number; max_tokens?: number; stream?: boolean }
-// ) {
-//   try {
-//     console.log(`[Grok] Calling ${model}...`);
-
-//     // Grok uses OpenAI-compatible API
-//     const completion = await grok.chat.completions.create({
-//       model,
-//       messages,
-//       temperature: options.temperature,
-//       max_tokens: options.max_tokens,
-//       stream: false, // Must be explicitly false for TypeScript
-//     });
-
-//     return NextResponse.json({
-//       id: completion.id,
-//       object: 'chat.completion',
-//       created: completion.created,
-//       model: completion.model,
-//       choices: completion.choices,
-//       usage: completion.usage,
-//     });
-//   } catch (error) {
-//     console.error('[Grok] Error:', error);
-//     throw error;
-//   }
-// }
 
 export const runtime = 'nodejs';
-export const maxDuration = 60; // 60 seconds for Vercel Pro
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
+// ---------- Env & Helpers ----------
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gpt-4o-mini';
+const SUPERAGENT_PROXY_URL = normalizeBase(process.env.SUPERAGENT_PROXY_URL); // e.g. https://firewall.superagent.sh/<config_id>/v1
+const SUPERAGENT_API_KEY = process.env.SUPERAGENT_API_KEY || '';              // e.g. sa_********************************
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+
+function normalizeBase(raw?: string) {
+  if (!raw) return '';
+  let url = raw.trim().replace(/\/+$/, '');
+  if (!/\/v1$/i.test(url)) url += '/v1';
+  return url;
+}
+
+function json(res: any, status = 200) {
+  return new Response(JSON.stringify(res, null, 2), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
+}
+
+// CORS for RN debug builds (optional; keep if you hit CORS in dev)
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'POST, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization',
+};
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS as any });
+}
+
+// ---------- Route Handler ----------
+export async function POST(req: NextRequest) {
+  const started = Date.now();
+
+  try {
+    const body = await safeJson(req);
+    const model: string = body.model || DEFAULT_MODEL;
+    const stream: boolean = !!body.stream;
+    const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
+
+    // Route by model prefix
+    if (model.startsWith('claude-')) {
+      if (!anthropic) return withCors(json({ error: 'Anthropic not configured' }, 400));
+      return withCors(await handleAnthropic({ model, messages, temperature: body.temperature, max_tokens: body.max_tokens }));
+    }
+
+    // Default: OpenAI-compatible via Superagent Firewall
+    if (!SUPERAGENT_PROXY_URL || !SUPERAGENT_API_KEY) {
+      return withCors(json({
+        error: 'Missing SUPERAGENT_PROXY_URL or SUPERAGENT_API_KEY',
+        expected: ['SUPERAGENT_PROXY_URL', 'SUPERAGENT_API_KEY'],
+      }, 500));
+    }
+
+    if (stream) {
+      return withCors(await proxyOpenAIStream({ body, started }));
+    } else {
+      return withCors(await proxyOpenAINonStream({ body, started }));
+    }
+  } catch (err: any) {
+    console.error('[AI API] Uncaught error:', err);
+    const detail = err?.stack || String(err?.message || err);
+    return withCors(json({ error: 'AI proxy error', detail }, 500));
+  }
+}
+
+// ---------- Implementations ----------
+
+async function proxyOpenAINonStream({ body, started }: { body: any; started: number; }) {
+  const url = `${SUPERAGENT_PROXY_URL}/chat/completions`;
+
+  // Force identity encoding so upstream returns plain JSON (no gzip)
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${SUPERAGENT_API_KEY}`,
+      'content-type': 'application/json',
+      'accept': 'application/json',
+      'accept-encoding': 'identity', // ← critical fix for your gzip error
+      // (Optional) if your gateway uses per-request model override:
+      // 'x-openai-model': body.model || DEFAULT_MODEL,
+    },
+    // Make sure we send only what OpenAI expects
+    body: JSON.stringify({
+      model: body.model || DEFAULT_MODEL,
+      messages: body.messages,
+      temperature: body.temperature,
+      max_tokens: body.max_tokens,
+      top_p: body.top_p,
+      presence_penalty: body.presence_penalty,
+      frequency_penalty: body.frequency_penalty,
+      response_format: body.response_format,
+      tools: body.tools,
+      tool_choice: body.tool_choice,
+      // DO NOT send stream in non-stream branch
+    }),
+  });
+
+  const text = await res.text(); // get raw response text first for better diagnostics
+
+  if (!res.ok) {
+    console.error('[OpenAI via Superagent] Non-OK:', res.status, text.slice(0, 500));
+    return json({ error: 'Upstream (Superagent) error', status: res.status, detail: safeParse(text) }, res.status);
+  }
+
+  // Try JSON parse; if it fails we’ll surface a clearer error
+  try {
+    const data = JSON.parse(text);
+    const took = Date.now() - started;
+    return json({ ...data, _meta: { upstream: 'superagent', took_ms: took } }, 200);
+  } catch (e) {
+    // If compression leaked through, you'll see gzip bytes here
+    console.error('[OpenAI via Superagent] JSON parse error. First 40 bytes:', text.slice(0, 40));
+    return json({
+      error: 'Invalid JSON from upstream (likely compressed)',
+      hint: 'Upstream sent compressed payload. We now send Accept-Encoding: identity. If this persists, check gateway config.',
+      preview: text.slice(0, 120),
+    }, 502);
+  }
+}
+
+async function proxyOpenAIStream({ body, started }: { body: any; started: number; }) {
+  const url = `${SUPERAGENT_PROXY_URL}/chat/completions`;
+
+  // Request server-sent events stream
+  const upstream = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${SUPERAGENT_API_KEY}`,
+      'content-type': 'application/json',
+      'accept': 'text/event-stream',
+      'accept-encoding': 'identity', // avoid gzip’d SSE
+    },
+    body: JSON.stringify({
+      ...body,
+      stream: true,
+      model: body.model || DEFAULT_MODEL,
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text();
+    console.error('[OpenAI via Superagent][stream] Non-OK:', upstream.status, errText.slice(0, 500));
+    return json({ error: 'Upstream (Superagent) error', status: upstream.status, detail: safeParse(errText) }, upstream.status);
+  }
+
+  // Pipe SSE stream as-is
+  const readable = upstream.body;
+  if (!readable) return json({ error: 'Upstream returned empty body' }, 502);
+
+  const headers = new Headers({
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-upstream': 'superagent',
+    ...CORS_HEADERS,
+  });
+
+  const took = Date.now() - started;
+  headers.set('x-startup-ms', String(took));
+  return new Response(readable, { status: 200, headers });
+}
+
+async function handleAnthropic(opts: { model: string; messages: any[]; temperature?: number; max_tokens?: number; }) {
+  const { model, messages, temperature, max_tokens } = opts;
+
+  // Convert OpenAI-style messages → Anthropic format
+  const sysParts = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+  const chatParts = messages.filter((m) => m.role !== 'system').map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : 'user',
+    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+  }));
+
+  const r = await anthropic!.messages.create({
+    model,
+    max_tokens: max_tokens ?? 1024,
+    temperature: temperature ?? 0.7,
+    system: sysParts || undefined,
+    messages: chatParts as any,
+  });
+
+  const text = r?.content?.map((p: any) => p?.text).filter(Boolean).join('\n') || '';
+  return json({
+    id: r.id,
+    object: 'chat.completion',
+    model,
+    created: Math.floor(Date.now() / 1000),
+    choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: text } }],
+    _meta: { upstream: 'anthropic' },
+  });
+}
+
+// ---------- Utils ----------
+
+async function safeJson(req: NextRequest) {
+  try {
+    return await req.json();
+  } catch {
+    return {};
+  }
+}
+
+function safeParse(s: string) {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+function withCors(r: Response) {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => r.headers.set(k, v));
+  return r;
+}
