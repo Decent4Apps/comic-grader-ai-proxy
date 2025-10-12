@@ -1,123 +1,87 @@
-// app/api/ai/route.ts
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// app/api/status/route.ts
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 export const maxDuration = 15;
 
-const DEFAULT_MODEL = (process.env.DEFAULT_MODEL || "gpt-4o-mini").trim();
-
-function normalizeFirewallBase(raw?: string): string {
-  if (!raw) throw new Error("Missing SUPERAGENT_PROXY_URL");
-  let url = raw.trim().replace(/\/+$/, "");
-  if (!/\/v1$/i.test(url)) url += "/v1";
+function normalizeBase(raw?: string) {
+  if (!raw) return '';
+  let url = raw.trim().replace(/\/+$/, '');
+  if (!/\/v1$/i.test(url)) url += '/v1';
   return url;
 }
 
-function json(data: any, status = 200) {
+function j(data: any, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 }
 
-export async function POST(req: Request) {
-  const started = Date.now();
+export async function GET() {
+  const SUPERAGENT_PROXY_URL = normalizeBase(process.env.SUPERAGENT_PROXY_URL);
+  const SUPERAGENT_API_KEY = (process.env.SUPERAGENT_API_KEY || '').trim();
+  const DEFAULT_MODEL = (process.env.DEFAULT_MODEL || '').trim();
 
-  try {
-    const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
-    const saKey = (process.env.SUPERAGENT_API_KEY || "").trim();
-    if (!saKey) return json({ error: "Missing SUPERAGENT_API_KEY" }, 500);
+  const missing: string[] = [];
+  if (!SUPERAGENT_PROXY_URL) missing.push('SUPERAGENT_PROXY_URL');
+  if (!SUPERAGENT_API_KEY) missing.push('SUPERAGENT_API_KEY');
+  if (!DEFAULT_MODEL) missing.push('DEFAULT_MODEL');
 
-    // Read client body (be tolerant of bad JSON)
-    const incoming = await req.json().catch(() => ({}));
+  const envOk = missing.length === 0;
+  let upstreamOk: boolean | null = null;
+  let upstreamStatus: number | null = null;
+  let upstreamErr: string | null = null;
+  let upstreamBody: any = null;
 
-    // Basic OpenAI-compatible shape
-    let {
-      model,
-      messages,
-      stream,
-      temperature,
-      max_tokens,
-      top_p,
-      response_format,
-      tools,
-      tool_choice,
-      // allow passthrough for image content etc.
-      ...rest
-    } = incoming || {};
-
-    // 🛡️ Ensure messages is an array
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return json({ error: "Missing messages[] in request body" }, 400);
-    }
-
-    // 🛡️ Ensure model is present (fixes your Superagent error)
-    model = (model || DEFAULT_MODEL).trim();
-    if (!model) {
-      return json({ error: "Model must be specified. Set DEFAULT_MODEL or pass model in body." }, 400);
-    }
-
-    // Construct upstream request
-    const upstreamUrl = `${base}/chat/completions`;
-    const payload: any = {
-      model,
-      messages,
-      stream: !!stream,
-      ...rest,
-    };
-    if (typeof temperature === "number") payload.temperature = temperature;
-    if (typeof max_tokens === "number") payload.max_tokens = max_tokens;
-    if (typeof top_p === "number") payload.top_p = top_p;
-    if (response_format) payload.response_format = response_format;
-    if (Array.isArray(tools)) payload.tools = tools;
-    if (tool_choice) payload.tool_choice = tool_choice;
-
-    const res = await fetch(upstreamUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        // Superagent gateway accepts any of these; sending all is fine:
-        "x-api-key": saKey,
-        "x-superagent-api-key": saKey,
-        "x-superagent-token": saKey,
-        // Avoid gzip → React Native parsing issues
-        "accept-encoding": "identity",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    // Stream passthrough if requested
-    if (payload.stream && res.ok && res.body) {
-      // stream raw SSE
-      const headers = new Headers(res.headers);
-      headers.set("content-encoding", "identity");
-      return new Response(res.body, { status: 200, headers });
-    }
-
-    // Non-stream: return parsed or first 2KB of error text
-    const text = await res.text();
-    if (!res.ok) {
-      return json(
-        {
-          error: "Upstream (Superagent) error",
-          status: res.status,
-          body: text.slice(0, 2000),
-          elapsed_ms: Date.now() - started,
-        },
-        502
-      );
-    }
-
-    // Try to parse JSON, but don’t explode if it’s not
+  if (envOk) {
     try {
-      const parsed = JSON.parse(text);
-      return json(parsed, 200);
-    } catch {
-      return new Response(text, {
-        status: 200,
-        headers: { "content-type": res.headers.get("content-type") || "application/json" },
+      const res = await fetch(`${SUPERAGENT_PROXY_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': SUPERAGENT_API_KEY,
+          'x-superagent-api-key': SUPERAGENT_API_KEY,
+          'x-superagent-token': SUPERAGENT_API_KEY,
+          'content-type': 'application/json',
+          'accept-encoding': 'identity',
+        },
+        body: JSON.stringify({
+          model: DEFAULT_MODEL, // <-- use your tenant-mapped slug here
+          messages: [{ role: 'user', content: 'ping' }],
+          stream: false,
+        }),
       });
+
+      upstreamStatus = res.status;
+      const txt = await res.text();
+
+      try {
+        upstreamBody = JSON.parse(txt);
+      } catch {
+        upstreamBody = txt.slice(0, 500);
+      }
+
+      upstreamOk = res.ok;
+      if (!res.ok) {
+        upstreamErr = typeof upstreamBody === 'string'
+          ? upstreamBody
+          : JSON.stringify(upstreamBody).slice(0, 500);
+      }
+    } catch (e: any) {
+      upstreamOk = false;
+      upstreamErr = String(e);
     }
-  } catch (e: any) {
-    return json({ error: "AI proxy error", detail: String(e) }, 500);
   }
+
+  const status = !envOk ? 500 : upstreamOk ? 200 : 502;
+
+  return j({
+    ok: envOk && !!upstreamOk,
+    missing,
+    env: {
+      DEFAULT_MODEL,
+      SUPERAGENT_PROXY_URL_SET: !!SUPERAGENT_PROXY_URL,
+      SUPERAGENT_API_KEY_SET: !!SUPERAGENT_API_KEY,
+    },
+    upstream: { ok: upstreamOk, status: upstreamStatus, err: upstreamErr, body: upstreamBody },
+  }, status);
 }
