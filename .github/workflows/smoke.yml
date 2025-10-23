@@ -1,38 +1,48 @@
-name: Smoke (Production)
+# .github/workflows/smoke.yml
+name: Smoke
 
 on:
-  workflow_run:
-    workflows: [ CI ]
-    types: [ completed ]
+  push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Principle of least privilege — no write perms by default
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Skip draft PRs (saves minutes; reduces surface)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    env:
-      BASE: https://comic-grader-ai-proxy.vercel.app
+    timeout-minutes: 15
+
     steps:
-      - name: Health
-        run: |
-          set -e
-          curl -fsS "$BASE/api/health" | jq .
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Avoid persisting a token in git config for PRs from forks
+          persist-credentials: false
+          # Always test the actual PR head when present
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Auth (anon)
-        id: anon
-        run: |
-          set -e
-          TOK=$(curl -fsS -X POST "$BASE/api/auth/anon" | jq -r .token)
-          test -n "$TOK" || (echo "No token"; exit 1)
-          echo "token=$TOK" >> $GITHUB_OUTPUT
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
 
-      - name: AI ping
-        env:
-          TOKEN: ${{ steps.anon.outputs.token }}
-        run: |
-          set -e
-          curl -fsS -X POST "$BASE/api/ai" \
-            -H "authorization: Bearer $TOKEN" \
-            -H "content-type: application/json" \
-            -d '{"provider":"openai","model":"gpt-4o-mini","temperature":0.2,"messages":[{"role":"user","content":"ping"}]}' \
-            | jq .
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build --if-present
+
+      - name: Smoke tests
+        run: npm run smoke --if-present
