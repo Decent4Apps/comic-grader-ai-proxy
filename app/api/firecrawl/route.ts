@@ -4,8 +4,6 @@ import Firecrawl from "@mendable/firecrawl-js";
 
 export const runtime = "nodejs";
 
-const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
-
 type Doc = {
   title?: string;
   url?: string;
@@ -16,6 +14,9 @@ type Doc = {
 export async function POST(req: NextRequest) {
   const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
+    const apiKey = process.env.FIRECRAWL_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "Firecrawl is not configured" }, { status: 503 });
+    const firecrawl = new Firecrawl({ apiKey });
     const body = await readPaidJson(req);
     const {
       title,

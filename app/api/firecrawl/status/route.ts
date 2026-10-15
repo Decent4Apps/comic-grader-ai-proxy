@@ -1,6 +1,6 @@
 import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/firecrawl/status/route.ts
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   const denied = await authorizePaidRequest(req); if (denied) return denied;

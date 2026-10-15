@@ -7,10 +7,6 @@ import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../li
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 export async function POST(req: NextRequest) {
   const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
@@ -39,6 +35,9 @@ async function handleAIRequest(body: any) {
   const { model, messages, temperature, max_tokens } = body;
 
   try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "OpenAI is not configured" }, { status: 503 });
+    const openai = new OpenAI({ apiKey });
     console.log(`[Firecrawl Search - AI] Calling OpenAI with ${model}...`);
     
     const completion = await openai.chat.completions.create({
