@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../lib/paid-security.mjs";
 /**
  * Key Collector Comics API Route for Vercel
  * Deploy this to: app/api/key-collector/route.ts
@@ -9,10 +10,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   console.log('[Key Collector API] ========== ENTRY ==========');
   
   try {
-    const body = await req.json();
+    const body = await readPaidJson(req);
     const { title, issue, site } = body;
 
     console.log(`[Key Collector API] Request: ${title} #${issue} from ${site}`);

@@ -1,9 +1,8 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 import { NextRequest, NextResponse } from "next/server";
 import Firecrawl from "@mendable/firecrawl-js";
 
 export const runtime = "nodejs";
-
-const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! });
 
 type Doc = {
   title?: string;
@@ -13,8 +12,12 @@ type Doc = {
 };
 
 export async function POST(req: NextRequest) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
-    const body = await req.json();
+    const apiKey = process.env.FIRECRAWL_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "Firecrawl is not configured" }, { status: 503 });
+    const firecrawl = new Firecrawl({ apiKey });
+    const body = await readPaidJson(req);
     const {
       title,
       issue,
@@ -56,7 +59,7 @@ export async function POST(req: NextRequest) {
 
     // Firecrawl v2 search — note: returns an ARRAY of documents
     const result = await firecrawl.search(query, {
-      limit: typeof maxResults === "number" ? maxResults : 12,
+      limit: Math.min(25, Math.max(1, Number(maxResults) || 12)),
       sources: ["web"],
       tbs,
       scrapeOptions: {

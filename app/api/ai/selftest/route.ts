@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/ai/selftest/route.ts
 /**
  * Sanity route: sends a 1-line prompt through Superagent Firewall
@@ -26,7 +27,8 @@ function json(data: any, status = 200) {
   });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   if (!SUPERAGENT_PROXY_URL || !SUPERAGENT_API_KEY) {
     return json({
       ok: false,

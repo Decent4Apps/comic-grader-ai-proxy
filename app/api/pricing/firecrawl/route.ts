@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/pricing/firecrawl/route.ts
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -18,10 +19,11 @@ function json(data: any, status = 200) {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   const started = Date.now();
   
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await readPaidJson(req).catch(() => ({}));
     const {
       query: incomingQuery,
       title,
@@ -36,7 +38,7 @@ export async function POST(req: NextRequest) {
     console.log('[Pricing v2] Starting search:', { query, limit });
 
     // v2: ONE call gets URLs + markdown
-    const results = await searchWithScrape(query, limit);
+    const results = await searchWithScrape(query, Math.min(25, Math.max(1, Number(limit) || 6)));
 
     console.log('[Pricing v2] Got', results.length, 'results from Firecrawl');
 
@@ -99,7 +101,8 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   const hasKey = !!process.env.FIRECRAWL_API_KEY;
   return json(
     {

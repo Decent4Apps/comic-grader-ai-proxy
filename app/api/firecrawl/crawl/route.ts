@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/firecrawl/crawl/route.ts
 export const runtime = "nodejs";
 
@@ -5,6 +6,7 @@ const BASE = process.env.FIRECRAWL_BASE || "https://api.firecrawl.dev/v1";
 const KEY = process.env.FIRECRAWL_API_KEY || "";
 
 export async function POST(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   if (!KEY) {
     return new Response(JSON.stringify({ error: "Missing FIRECRAWL_API_KEY" }), {
       status: 500,
@@ -22,7 +24,7 @@ export async function POST(req: Request) {
     webhook,       // { url, events: ["crawl.started","crawl.page","crawl.completed"] }
     scrapeOptions, // e.g. { formats: [{ type: "markdown" }], timeout: 20000 }
     zeroDataRetention,
-  } = await req.json().catch(() => ({}));
+  } = await readPaidJson(req).catch(() => ({}));
 
   if (!url) {
     return new Response(JSON.stringify({ error: "Body must include { url }" }), {
@@ -32,15 +34,11 @@ export async function POST(req: Request) {
   }
 
   const payload = {
-    url,
-    includePaths,
-    excludePaths,
-    maxDiscoveryDepth,
-    maxCrawledLinks,
-    concurrency,
-    webhook,
-    scrapeOptions,
-    zeroDataRetention,
+    url, includePaths, excludePaths,
+    limit: Math.min(25, Math.max(1, Number(maxCrawledLinks) || 10)),
+    maxDiscoveryDepth: Math.min(2, Math.max(0, Number(maxDiscoveryDepth) || 0)),
+    maxConcurrency: 1,
+    scrapeOptions: { formats: ["markdown"], timeout: 15000 },
   };
 
   const r = await fetch(`${BASE}/crawl`, {

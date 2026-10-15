@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 /**
  * Complete replacement for: app/api/firecrawl/search/route.ts
  * This file handles Firecrawl search requests with OpenAI integration
@@ -6,19 +7,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 export async function POST(req: NextRequest) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
-    const body = await req.json();
+    const body = await readPaidJson(req);
     
     console.log('[Firecrawl Search] Received request:', body);
 
     // If this is an AI request, handle it
     if (body.model && body.messages) {
-      return await handleAIRequest(body);
+      return await handleAIRequest(boundAIInput(body));
     }
 
     // Otherwise, handle as Firecrawl search
@@ -37,6 +35,9 @@ async function handleAIRequest(body: any) {
   const { model, messages, temperature, max_tokens } = body;
 
   try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "OpenAI is not configured" }, { status: 503 });
+    const openai = new OpenAI({ apiKey });
     console.log(`[Firecrawl Search - AI] Calling OpenAI with ${model}...`);
     
     const completion = await openai.chat.completions.create({
