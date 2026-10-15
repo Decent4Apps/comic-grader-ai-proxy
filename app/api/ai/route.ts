@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../lib/paid-security.mjs";
 // app/api/ai/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,10 +43,11 @@ function toProxyModel(model?: string) {
 }
 
 export async function POST(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   const started = Date.now();
 
   // read incoming
-  const incoming = await req.json().catch(() => ({} as any));
+  const incoming = boundAIInput(await readPaidJson(req));
   let { model, messages, stream, ...rest } = incoming || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return json({ error: "Missing messages[] in request body" }, 400);

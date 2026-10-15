@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/ai/models/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +18,8 @@ function J(data: any, status = 200) {
   });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
     const base = normalizeBase(process.env.SUPERAGENT_PROXY_URL);
     const key = (process.env.SUPERAGENT_API_KEY || "").trim();

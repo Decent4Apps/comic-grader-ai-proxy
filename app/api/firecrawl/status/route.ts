@@ -1,7 +1,9 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/firecrawl/status/route.ts
 export const runtime = "edge";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   const ok = {
     FIRECRAWL_API_KEY: !!process.env.FIRECRAWL_API_KEY,
     FIRECRAWL_BASE_URL: process.env.FIRECRAWL_BASE_URL || "https://api.firecrawl.dev",

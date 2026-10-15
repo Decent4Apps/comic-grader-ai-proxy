@@ -1,3 +1,4 @@
+import { authorizePaidRequest, readPaidJson, boundAIInput } from "../../../../lib/paid-security.mjs";
 // app/api/ai/debug/route.ts
 export const runtime = "nodejs";
 
@@ -16,7 +17,8 @@ function getAuthHeader(): string {
   return `Bearer ${key}`;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await authorizePaidRequest(req); if (denied) return denied;
   try {
     const base = normalizeFirewallBase(process.env.SUPERAGENT_PROXY_URL);
     const upstreamUrl = `${base}/chat/completions`;
